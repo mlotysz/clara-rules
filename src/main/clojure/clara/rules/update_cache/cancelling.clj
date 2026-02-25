@@ -120,26 +120,26 @@
             (recur))))))
 
   (get-updates-and-reset! [this]
-    (let [retractions-update (when (-> retractions .size pos?)
-                               (uc/->PendingUpdate :retract (map->vals-concated retractions)))
-          insertions-update (when (-> insertions .size pos?)
-                              (uc/->PendingUpdate :insert (map->vals-concated insertions)))]
+    (let [retract-facts (when (-> retractions .size pos?)
+                          (map->vals-concated retractions))
+          insert-facts (when (-> insertions .size pos?)
+                         (map->vals-concated insertions))]
       (set! insertions (LinkedHashMap.))
       (set! retractions (LinkedHashMap.))
 
       (cond
 
-        (and insertions-update retractions-update)
+        (and insert-facts retract-facts)
         ;; This could be ordered to have insertions before retractions if we ever
         ;; found that that performs better on average.  Either ordering should
         ;; be functionally correct.
-        [[retractions-update] [insertions-update]]
+        [[:retract retract-facts] [:insert insert-facts]]
 
-        insertions-update
-        [[insertions-update]]
+        insert-facts
+        [[:insert insert-facts]]
 
-        retractions-update
-        [[retractions-update]]))))
+        retract-facts
+        [[:retract retract-facts]]))))
 
 ;; We use LinkedHashMap so that the ordering of the pending updates will be deterministic.
 (defn get-cancelling-update-cache

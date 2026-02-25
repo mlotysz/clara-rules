@@ -151,13 +151,21 @@
     (if (pos? (count join-keys))
 
       ;; Group by the join keys for the activation.
-      (doseq [[join-bindings item-group] (platform/group-by-seq #(select-keys (:bindings %) join-keys) items)]
-        (propagate-fn node
-                      join-bindings
-                      item-group
-                      memory
-                      transport
-                      listener))
+      ;; Specialize extraction for common key counts to avoid select-keys overhead.
+      (let [n (count join-keys)
+            extract-fn (case n
+                         1 (let [k (first join-keys)]
+                             #(let [b (:bindings %)] {k (b k)}))
+                         2 (let [[k1 k2] (seq join-keys)]
+                             #(let [b (:bindings %)] {k1 (b k1) k2 (b k2)}))
+                         #(select-keys (:bindings %) join-keys))]
+        (doseq [[join-bindings item-group] (platform/group-by-seq extract-fn items)]
+          (propagate-fn node
+                        join-bindings
+                        item-group
+                        memory
+                        transport
+                        listener)))
 
       ;; The node has no join keys, so just send everything at once
       ;; (if there is something to send.)
@@ -242,7 +250,7 @@
           ;; retracted in this iteration of the loop outside the cache.  Now reset
           ;; the cache.  The retractions we execute may cause new retractions to be queued
           ;; up, in which case the loop will execute again.
-          _ (reset! *pending-external-retractions* [])]
+          _ (vreset! *pending-external-retractions* [])]
       (doseq [[alpha-roots fact-group] (get-alphas-fn retractions)
               root alpha-roots]
         (alpha-retract root fact-group memory transport listener))
@@ -260,12 +268,11 @@
               (if (empty? pending-updates)
                 flushed-items?
                 (do
-                  (doseq [partition pending-updates
-                          :let [facts (mapcat :facts partition)]
+                  (doseq [[update-type facts] pending-updates
                           [alpha-roots fact-group] (get-alphas-fn facts)
                           root alpha-roots]
 
-                    (if (= :insert (:type (first partition)))
+                    (if (= :insert update-type)
                       (alpha-activate root fact-group transient-memory transport listener)
                       (alpha-retract root fact-group transient-memory transport listener)))
 
@@ -281,14 +288,14 @@
   immediately after the RHS of a rule fires."
   [facts unconditional]
   (if unconditional
-    (swap! (:batched-unconditional-insertions *rule-context*) into facts)
-    (swap! (:batched-logical-insertions *rule-context*) into facts)))
+    (vswap! (:batched-unconditional-insertions *rule-context*) into facts)
+    (vswap! (:batched-logical-insertions *rule-context*) into facts)))
 
 (defn rhs-retract-facts!
   "Place all facts retracted in the RHS in a buffer to be retracted after
    the eval'ed RHS function completes."
   [facts]
-  (swap! (:batched-rhs-retractions *rule-context*) into facts))
+  (vswap! (:batched-rhs-retractions *rule-context*) into facts))
 
 (defn ^:private flush-rhs-retractions!
   "Retract all facts retracted in the RHS after the eval'ed RHS function completes.
@@ -298,7 +305,7 @@
   (let [{:keys [rulebase transient-memory transport insertions get-alphas-fn listener]} *current-session*
         {:keys [node token]} *rule-context*]
     ;; Update the count so the rule engine will know when we have normalized.
-    (swap! insertions + (count facts))
+    (vswap! insertions + (count facts))
 
     (when-not (l/null-listener? listener)
       (l/retract-facts! listener node token facts))
@@ -316,7 +323,7 @@
         {:keys [node token]} *rule-context*]
 
     ;; Update the insertion count.
-    (swap! insertions + (count facts))
+    (vswap! insertions + (count facts))
 
     ;; Track this insertion in our transient memory so logical retractions will remove it.
     (if unconditional
@@ -411,7 +418,7 @@
           (do
             (doseq [[token token-insertions] token-insertion-map]
               (l/retract-facts-logical! listener node token token-insertions))
-            (swap! *pending-external-retractions* into insertions))
+            (vswap! *pending-external-retractions* into insertions))
 
           :else
           (throw (ex-info (str "Attempting to retract from a ProductionNode when neither *current-session* nor "
@@ -1857,13 +1864,17 @@
   [base1 base2]
   (concat base1 base2))
 
+;; Record for the per-activation rule context, replacing a per-activation map allocation.
+;; Supports keyword lookup, destructuring, and get-in — fully compatible with all access patterns.
+(defrecord RuleContext [token node batched-logical-insertions batched-unconditional-insertions batched-rhs-retractions])
+
 (defn fire-rules*
   "Fire rules for the given nodes."
   [rulebase nodes transient-memory transport listener get-alphas-fn update-cache]
   (binding [*current-session* {:rulebase rulebase
                                :transient-memory transient-memory
                                :transport transport
-                               :insertions (atom 0)
+                               :insertions (volatile! 0)
                                :get-alphas-fn get-alphas-fn
                                :pending-updates update-cache
                                :listener listener}]
@@ -1892,14 +1903,13 @@
               ;; calls in insert-facts!.  This shouldn't have a functional impact, since any ordering
               ;; should be valid, but makes traces less confusing to end users.  It also prevents any laziness
               ;; in the sequences.
-              (let [batched-logical-insertions (atom [])
-                    batched-unconditional-insertions (atom [])
-                    batched-rhs-retractions (atom [])]
-                (binding [*rule-context* {:token token
-                                          :node node
-                                          :batched-logical-insertions batched-logical-insertions
-                                          :batched-unconditional-insertions batched-unconditional-insertions
-                                          :batched-rhs-retractions batched-rhs-retractions}]
+              (let [batched-logical-insertions (volatile! [])
+                    batched-unconditional-insertions (volatile! [])
+                    batched-rhs-retractions (volatile! [])]
+                (binding [*rule-context* (->RuleContext token node
+                                                              batched-logical-insertions
+                                                              batched-unconditional-insertions
+                                                              batched-rhs-retractions)]
 
                   ;; Fire the rule itself.
                   (try
@@ -2033,7 +2043,7 @@
               (do
                 (l/insert-facts! transient-listener nil nil facts)
 
-                (binding [*pending-external-retractions* (atom [])]
+                (binding [*pending-external-retractions* (volatile! [])]
                   ;; Bind the external retractions cache so that any logical retractions as a result
                   ;; of these insertions can be cached and executed as a batch instead of eagerly realizing
                   ;; them.  An external insertion of a fact that matches
@@ -2047,7 +2057,7 @@
               (do
                 (l/retract-facts! transient-listener nil nil facts)
 
-                (binding [*pending-external-retractions* (atom facts)]
+                (binding [*pending-external-retractions* (volatile! facts)]
                   (external-retract-loop get-alphas-fn transient-memory transport transient-listener)))))
 
           (fire-rules* rulebase
@@ -2080,7 +2090,7 @@
                   (binding [*current-session* {:rulebase rulebase
                                                :transient-memory transient-memory
                                                :transport transport
-                                               :insertions (atom 0)
+                                               :insertions (volatile! 0)
                                                :get-alphas-fn get-alphas-fn
                                                :pending-updates update-cache
                                                :listener transient-listener}]
