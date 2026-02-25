@@ -1,4 +1,5 @@
 /target
+/out
 /lib
 /classes
 /checkouts
@@ -11,6 +12,7 @@ pom.xml.asc
 .lein-failures
 .lein-plugins
 .lein-repl-history
+.cpcache
 figwheel_server.log
 *.*~
 .idea/*
