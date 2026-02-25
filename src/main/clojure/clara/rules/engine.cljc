@@ -553,6 +553,87 @@
         (platform/eager-for [[fact bindings] fact-binding-pairs]
                             (->Element fact bindings))))))
 
+;; A fused alpha node that wraps multiple AlphaNodes for the same fact type.
+;; Instead of N independent alpha-activate dispatches per fact batch, a single
+;; FusedAlphaNode iterates per-fact-then-per-node for better cache locality,
+;; accumulates elements per original node, then batch-dispatches to beta children.
+(defrecord FusedAlphaNode [id entries fact-type]
+  ;; entries: vector of {:id, :env, :children, :activation, :node (original AlphaNode)}
+  IAlphaActivate
+  (alpha-activate [this facts memory transport listener]
+    (let [n (count entries)
+          slots (object-array n)]
+      ;; For each fact, try each entry's activation
+      (doseq [fact facts]
+        (dotimes [i n]
+          (let [entry (nth entries i)
+                bindings (try ((:activation entry) fact (:env entry))
+                              (catch #?(:clj Exception :cljs :default) e
+                                (throw-condition-exception {:cause e
+                                                           :node (:node entry)
+                                                           :fact fact
+                                                           :env (:env entry)})))]
+            (when bindings
+              (let [element (->Element fact bindings)
+                    existing (aget slots i)]
+                (aset slots i (if existing
+                                (conj existing element)
+                                [element])))))))
+      ;; Dispatch accumulated elements per entry
+      (let [null-listener (l/null-listener? listener)]
+        (dotimes [i n]
+          (when-let [elements (aget slots i)]
+            (let [entry (nth entries i)]
+              (when-not null-listener
+                (l/alpha-activate! listener (:node entry) (mapv :fact elements)))
+              (send-elements transport memory listener (:children entry) elements)))))))
+
+  (alpha-retract [this facts memory transport listener]
+    (let [n (count entries)
+          slots (object-array n)]
+      ;; For each fact, try each entry's activation
+      (doseq [fact facts]
+        (dotimes [i n]
+          (let [entry (nth entries i)
+                bindings (try ((:activation entry) fact (:env entry))
+                              (catch #?(:clj Exception :cljs :default) e
+                                (throw-condition-exception {:cause e
+                                                           :node (:node entry)
+                                                           :fact fact
+                                                           :env (:env entry)})))]
+            (when bindings
+              (let [element (->Element fact bindings)
+                    existing (aget slots i)]
+                (aset slots i (if existing
+                                (conj existing element)
+                                [element])))))))
+      ;; Dispatch accumulated elements per entry
+      (let [null-listener (l/null-listener? listener)]
+        (dotimes [i n]
+          (when-let [elements (aget slots i)]
+            (let [entry (nth entries i)]
+              (when-not null-listener
+                (l/alpha-retract! listener (:node entry) (mapv :fact elements)))
+              (retract-elements transport memory listener (:children entry) elements))))))))
+
+(defn fuse-alpha-nodes
+  "Given a vector of AlphaNodes for the same fact-type, returns a single
+   FusedAlphaNode wrapping them when there are 2+ nodes. For single-node
+   vectors (or empty), returns the nodes as-is."
+  [create-id-fn alpha-nodes]
+  (if (< (count alpha-nodes) 2)
+    alpha-nodes
+    [(->FusedAlphaNode
+      (create-id-fn)
+      (mapv (fn [node]
+              {:id (:id node)
+               :env (:env node)
+               :children (:children node)
+               :activation (:activation node)
+               :node node})
+            alpha-nodes)
+      (:fact-type (first alpha-nodes)))]))
+
 (defrecord RootJoinNode [id condition children binding-keys]
   ILeftActivate
   (left-activate [node join-bindings tokens memory transport listener]

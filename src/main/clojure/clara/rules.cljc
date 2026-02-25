@@ -146,6 +146,8 @@
     ;; We preserve a map of fact types to alpha nodes for efficiency,
     ;; effectively memoizing this operation.
     (let [alpha-map (atom {})
+          fused-id-counter (atom 0)
+          fused-id-fn (fn [] (swap! fused-id-counter inc))
           wrapped-fact-type-fn (if (= fact-type-fn type)
                                  type
                                  (fn [fact]
@@ -172,15 +174,18 @@
             ;; The alpha nodes weren't cached for the type, so get them now.
             (let [ancestors (conj (wrapped-ancestors-fn fact-type) fact-type)
 
-                  ;; Get all alpha nodes for all ancestors.
-                  new-nodes (distinct
-                             (reduce
-                              (fn [coll ancestor]
-                                (concat
-                                 coll
-                                 (get-in merged-rules [:alpha-roots ancestor])))
-                              []
-                              ancestors))]
+                  ;; Get all alpha nodes for all ancestors, then fuse multi-node groups.
+                  new-nodes (eng/fuse-alpha-nodes
+                             fused-id-fn
+                             (into []
+                                   (distinct)
+                                   (reduce
+                                    (fn [coll ancestor]
+                                      (concat
+                                       coll
+                                       (get-in merged-rules [:alpha-roots ancestor])))
+                                    []
+                                    ancestors)))]
 
               (swap! alpha-map assoc fact-type new-nodes)
               [new-nodes facts])))))))
