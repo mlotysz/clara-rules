@@ -36,13 +36,25 @@
           accum-map)))
 
 (defn- drop-one-of
-  "Removes one instance of the given value from the sequence."
+  "Removes one instance of the given value from the collection.
+   Optimized for vectors using subvec to avoid lazy seq allocation."
   [items value]
-  (let [pred #(not= value %)]
-    (into (empty items)
-          cat
-          [(take-while pred items)
-           (rest (drop-while pred items))])))
+  (if (vector? items)
+    (let [n (clojure.core/count items)
+          idx (loop [i 0]
+                (cond
+                  (>= i n) -1
+                  (= value (items i)) i
+                  :else (recur (inc i))))]
+      (if (neg? idx)
+        items
+        (into (subvec items 0 idx) (subvec items (inc idx)))))
+    ;; Non-vector fallback
+    (let [pred #(not= value %)]
+      (into (empty items)
+            cat
+            [(take-while pred items)
+             (rest (drop-while pred items))]))))
 
 (defn reduce-to-accum
   "Creates an accumulator using a given reduce function with optional initial value and
