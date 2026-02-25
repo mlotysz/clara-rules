@@ -1085,6 +1085,11 @@
   (get-condition-description [this]
     (into [:test] constraints)))
 
+;; Constant fallback value for accum-reduced when no previous result exists.
+;; Hoisted to avoid re-creating the vector + metadata on every accumulator activation.
+(def ^:private no-accum-reduced-initial
+  ^{::accum-node true} [::mem/no-accum-reduced ::not-reduced])
+
 (defn- do-accumulate
   "Runs the actual accumulation.  Returns the accumulated value.
    Two-arity uses the accumulator's initial-value; three-arity uses the provided initial value
@@ -1269,7 +1274,7 @@
                   has-previous? (not= ::mem/no-accum-reduced previous)
                   [previous previous-reduced] (if has-previous?
                                                 previous
-                                                [::mem/no-accum-reduced ::not-reduced])
+                                                no-accum-reduced-initial)
                   combined (if has-previous?
                              (into previous facts)
                              facts)
@@ -1377,7 +1382,7 @@
                   has-previous? (not= ::mem/no-accum-reduced previous)
                   [previous previous-reduced] (if has-previous?
                                                 previous
-                                                ^::accum-node [::mem/no-accum-reduced ::not-reduced])]
+                                                no-accum-reduced-initial)]
 
             ;; No need to retract anything if there were no previous items.
             :when has-previous?
@@ -1493,7 +1498,7 @@
     ;; to create the token "stream" of which it is part.
     (let [join-bindings (-> token :bindings (select-keys (get-join-keys this)))
           fact-bindings (-> token :bindings (select-keys new-bindings))]
-      (first (mem/get-accum-reduced memory this join-bindings (merge join-bindings fact-bindings))))))
+      (first (mem/get-accum-reduced memory this join-bindings (conj join-bindings fact-bindings))))))
 
 (defn- filter-accum-facts
   "Run a filter on elements against a given token for constraints that are not simple hash joins."
@@ -1640,9 +1645,9 @@
       ;; Combine the newly reduced values with any previous items.  Ensure that new items are always added to the end so that
       ;; we have a consistent order for retracting results from accumulators such as acc/all whose results can be in any order.  Making this
       ;; ordering consistent allows us to skip the filter step on previous elements on right-activations.
-      (let [combined-candidates (into []
-                                      cat
-                                      [previous-candidates candidates])]
+      (let [combined-candidates (if previous-candidates
+                                  (into previous-candidates candidates)
+                                  candidates)]
 
         (l/add-accum-reduced! listener node join-bindings combined-candidates bindings)
 
@@ -1830,7 +1835,7 @@
   (token->matching-elements [this memory token]
     (let [join-bindings (-> token :bindings (select-keys (get-join-keys this)))
           fact-bindings (-> token :bindings (select-keys new-bindings))
-          unfiltered-facts (mem/get-accum-reduced memory this join-bindings (merge join-bindings fact-bindings))]
+          unfiltered-facts (mem/get-accum-reduced memory this join-bindings (conj join-bindings fact-bindings))]
       ;; The functionality to throw conditions with meaningful information assumes that all bindings in the token
       ;; are meaningful to the join, which is not the case here since the token passed is from a descendant of this node, not
       ;; this node.  The generated error message also wouldn't make much sense in the context of session inspection.

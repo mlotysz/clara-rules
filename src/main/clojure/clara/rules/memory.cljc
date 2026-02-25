@@ -459,7 +459,7 @@
      (vals (get beta-memory (:id node) {}))))
 
   (get-accum-reduced [memory node join-bindings fact-bindings]
-    (get-in accum-memory [(:id node) join-bindings fact-bindings] ::no-accum-reduced))
+    (get (get (get accum-memory (:id node)) join-bindings) fact-bindings ::no-accum-reduced))
 
   (get-accum-reduced-all [memory node join-bindings]
     (get
@@ -690,13 +690,16 @@
          removed-tokens)))
 
   (add-accum-reduced! [memory node join-bindings accum-result fact-bindings]
-
-    (set! accum-memory
-          (assoc! accum-memory
-                  (:id node)
-                  (assoc-in (get accum-memory (:id node) {})
-                            [join-bindings fact-bindings]
-                            accum-result))))
+    (let [node-id (:id node)
+          node-mem (get accum-memory node-id {})]
+      (set! accum-memory
+            (assoc! accum-memory
+                    node-id
+                    (assoc node-mem
+                           join-bindings
+                           (assoc (get node-mem join-bindings {})
+                                  fact-bindings
+                                  accum-result))))))
 
   (remove-accum-reduced! [memory node join-bindings fact-bindings]
     (let [node-id (:id node)
@@ -919,9 +922,11 @@
                                   (update-vals (persistent! beta-memory) persistent-vals)
                                   (persistent! accum-memory)
                                   (persistent! production-memory)
-                                  (into {}
-                                        (map (juxt key (comp ->persistent-coll val)))
-                                        activation-map)))
+                                  (persistent!
+                                    (reduce (fn [m ^java.util.Map$Entry e]
+                                              (assoc! m (.getKey e) (->persistent-coll (.getValue e))))
+                                            (transient {})
+                                            activation-map))))
        :cljs
        (->PersistentLocalMemory rulebase
                                 activation-group-sort-fn
@@ -974,7 +979,7 @@
     ;; nil is a valid previously reduced value that can be found in the map.
     ;; Return ::no-accum-reduced instead of nil when there is no previously
     ;; reduced value in memory.
-    (get-in accum-memory [(:id node) join-bindings fact-bindings] ::no-accum-reduced))
+    (get (get (get accum-memory (:id node)) join-bindings) fact-bindings ::no-accum-reduced))
 
   (get-accum-reduced-all [memory node join-bindings]
     (get
@@ -1006,7 +1011,7 @@
              (vals activation-map))
        
        :cljs
-       (apply concat (vals activation-map))))
+       (into [] cat (vals activation-map))))
 
   IPersistentMemory
   (to-transient [memory]
