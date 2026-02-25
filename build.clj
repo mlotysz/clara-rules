@@ -21,7 +21,7 @@
   (b/javac {:src-dirs ["src/main/java"]
             :class-dir class-dir
             :basis (basis)
-            :javac-opts ["-source" "8" "-target" "8"]}))
+            :javac-opts ["-source" "21" "-target" "21"]}))
 
 (defn javac-test
   "Compile test Java sources to target/classes."
@@ -29,7 +29,7 @@
   (b/javac {:src-dirs ["src/test/java"]
             :class-dir class-dir
             :basis (basis [:dev])
-            :javac-opts ["-source" "8" "-target" "8"]}))
+            :javac-opts ["-source" "21" "-target" "21"]}))
 
 (defn javac
   "Compile all Java sources (main + test)."

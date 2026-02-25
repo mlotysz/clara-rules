@@ -8,7 +8,7 @@ Clara Rules is a forward-chaining rules engine for Clojure and ClojureScript, im
 
 ## Build & Test Commands
 
-Build tool: **Clojure CLI** (deps.edn + tools.build)
+Build tool: **Clojure CLI** (deps.edn + tools.build). Requires **Java 21+**.
 
 ```bash
 clojure -T:build javac                      # Compile Java sources (required before tests)
@@ -16,17 +16,17 @@ clojure -T:build javac-main                  # Compile only production Java sour
 clojure -M:test                              # Run standard tests (excludes generative/performance)
 clojure -M:test-generative                   # Run property-based generative tests
 clojure -M:test-performance                  # Run performance tests
-clojure -M:cljs-test -m cljs-build simple    # Compile CLJS tests (whitespace optimization)
+clojure -M:cljs-test -m cljs-build simple    # Compile CLJS tests (simple optimization)
 clojure -M:cljs-test -m cljs-build advanced  # Compile CLJS tests (advanced optimization)
-node src/test/js/runner.js src/test/html/simple.html    # Run CLJS tests (after compile)
-node src/test/js/runner.js src/test/html/advanced.html  # Run CLJS tests (after compile)
+node target/js/test-simple.js                # Run CLJS tests (simple, after compile)
+node target/js/test-advanced.js              # Run CLJS tests (advanced, after compile)
 clojure -M:dev -m clj-kondo.main --lint src/main:src/test --fail-level error  # Lint
 clojure -T:build jar                         # Build JAR
 clojure -T:build install                     # Install to local .m2
 clojure -T:build clean                       # Clean target/
 ```
 
-ClojureScript tests require Node.js + Puppeteer (`npm install puppeteer`).
+ClojureScript tests compile to Node.js target and require Node.js to run (no browser or npm dependencies needed).
 
 ## Source Layout
 
