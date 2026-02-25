@@ -1,0 +1,636 @@
+= Clara Rules: Rete Engine Architecture & Optimizations
+:toc: left
+:toclevels: 3
+:icons: font
+:source-highlighter: rouge
+
+== Overview
+
+Clara Rules implements the **Rete algorithm** for forward-chaining rule evaluation in Clojure and ClojureScript.
+This document describes the engine's internal architecture and the optimizations applied (and proposed) to improve throughput and reduce allocation pressure.
+
+The engine is cross-platform (`.cljc`), with the compiler (`compiler.clj`) being CLJ-only.
+Key source files:
+
+[cols="1,3"]
+|===
+|File |Role
+
+|`engine.cljc`
+|Core Rete network: node types, session, fire-rules loop
+
+|`memory.cljc`
+|Working memory protocols and transient/persistent implementations
+
+|`compiler.clj`
+|Compiles `defrule`/`defquery` forms into the Rete node graph
+
+|`accumulators.cljc`
+|Built-in accumulators (min, max, sum, count, all, distinct)
+
+|`update_cache/core.cljc`
+|Batched update cache used during rule firing
+
+|`listener.cljc`
+|Event listener protocol for tracing and debugging
+|===
+
+== Rete Network Architecture
+
+The Rete network has two phases: the **alpha network** filters individual facts by type and constraint, and the **beta network** joins across multiple conditions.
+
+=== High-Level Data Flow
+
+....
+              insert(facts)
+                  │
+                  ▼
+     ┌────────────────────────┐
+     │      Alpha Network     │
+     │                        │
+     │  fact-type-fn dispatch │──── groups facts by type (default: Java class)
+     │          │              │
+     │          ▼              │
+     │    ┌───────────┐       │
+     │    │ AlphaNode │ ×N    │──── each node tests one condition
+     │    │           │       │     activation fn: (fact, env) → bindings | nil
+     │    └─────┬─────┘       │
+     │          │              │
+     │          ▼              │
+     │   Element(fact, binds)  │──── matched facts wrapped as Elements
+     └────────────┬───────────┘
+                  │
+                  ▼
+     ┌────────────────────────┐
+     │      Beta Network      │
+     │                        │
+     │  Tokens flow left ───► │     Elements arrive from right
+     │                        │
+     │  ┌──────────────────┐  │
+     │  │  RootJoinNode    │  │──── entry point: converts Elements → Tokens
+     │  └────────┬─────────┘  │
+     │           │             │
+     │  ┌────────▼─────────┐  │
+     │  │  HashJoinNode /  │  │──── joins on binding keys (equality)
+     │  │  ExprJoinNode    │  │     or arbitrary join-filter-fn
+     │  └────────┬─────────┘  │
+     │           │             │
+     │  ┌────────▼─────────┐  │
+     │  │  NegationNode /  │  │──── :not conditions
+     │  │  AccumulateNode  │  │     :accum conditions
+     │  │  TestNode        │  │     :test conditions
+     │  └────────┬─────────┘  │
+     │           │             │
+     │  ┌────────▼─────────┐  │
+     │  │ ProductionNode / │  │──── terminal nodes
+     │  │ QueryNode        │  │     rules fire; queries collect results
+     │  └──────────────────┘  │
+     └────────────────────────┘
+....
+
+=== Core Data Structures
+
+[source,clojure]
+----
+;; A fact that passed alpha-node filtering, paired with extracted bindings
+(defrecord Element [fact bindings])
+
+;; A partial match flowing through the beta network
+(defrecord Token [matches   ;; vec of [fact, node-id] pairs
+                  bindings]) ;; map of ?var → value
+
+;; A rule ready to fire
+(defrecord Activation [node token])
+
+;; Root token — empty match at network entry
+(def empty-token (->Token [] {}))
+----
+
+=== Alpha Network Detail
+
+The alpha network is organized by **fact type** (determined by `fact-type-fn`, which defaults to `type`/Java class).
+When facts are inserted, `get-alphas-fn` maps each fact to its matching alpha-node roots.
+
+....
+  Facts: [TempReading{:value 110}, Order{:total 50}]
+         │
+         ▼
+  get-alphas-fn (fact-type dispatch)
+         │
+         ├── TempReading ──► AlphaNode-1 (activation: :value > 100?)
+         │                       │
+         │                       ├─ match → Element{TempReading, {?temp 110}}
+         │                       │              │
+         │                       │              ▼ (send-elements to beta children)
+         │                       │
+         │                       └─ AlphaNode-2 (activation: :value > 150?)
+         │                              └─ no match (nil bindings)
+         │
+         └── Order ──────── AlphaNode-3 (activation: always true)
+                                │
+                                └─ match → Element{Order, {?order <Order>}}
+....
+
+Each `AlphaNode` record contains:
+
+* `id` — unique node identifier
+* `env` — captured environment (closed-over variables from rule compilation)
+* `activation` — compiled condition function `(fn [fact env] bindings-or-nil)`
+* `children` — downstream beta nodes
+* `fact-type` — the type this node filters
+
+=== Beta Network Detail
+
+Beta nodes receive **Tokens from the left** (upstream beta nodes) and **Elements from the right** (alpha nodes).
+Join nodes combine them; terminal nodes consume them.
+
+==== Node Type Reference
+
+[cols="2,1,1,3"]
+|===
+|Node |Left |Right |Purpose
+
+|`RootJoinNode`
+|✓
+|✓
+|Entry point. Converts Elements into initial Tokens.
+
+|`HashJoinNode`
+|✓
+|✓
+|Equality join on `binding-keys`. Cross-product of matching tokens × elements.
+
+|`ExpressionJoinNode`
+|✓
+|✓
+|Join with arbitrary `join-filter-fn` predicate. Used when join cannot be expressed as simple equality.
+
+|`NegationNode`
+|✓
+|✓
+|Passes tokens only when _no_ matching elements exist. Implements `:not` conditions.
+
+|`NegationWithJoinFilterNode`
+|✓
+|✓
+|`:not` with a `join-filter-fn` applied per token-element pair.
+
+|`TestNode`
+|✓
+|—
+|Stateless boolean filter on tokens. Implements `:test` conditions.
+
+|`AccumulateNode`
+|✓
+|✓
+|Aggregates elements (sum, count, min, max, etc.) and binds result.
+
+|`AccumulateWithJoinFilterNode`
+|✓
+|✓
+|Accumulation with per-element join filtering.
+
+|`ProductionNode`
+|✓
+|—
+|Terminal. Creates `Activation` records for rule RHS execution.
+
+|`QueryNode`
+|✓
+|—
+|Terminal. Stores matching tokens for query retrieval.
+|===
+
+==== Join Node Cross-Product
+
+The fundamental operation at a join node is the **cross-product** of stored tokens and incoming elements (or vice versa).
+For `HashJoinNode`, elements and tokens are indexed by `binding-keys` so only compatible pairs are combined:
+
+....
+  left-activate(tokens):                right-activate(elements):
+
+    store tokens in β-memory              store elements in α-memory
+           │                                      │
+           ▼                                      ▼
+    lookup elements by                     lookup tokens by
+    join-bindings                          join-bindings
+           │                                      │
+           ▼                                      ▼
+    for each (token × element):            for each (token × element):
+      new-token = Token(                     new-token = Token(
+        matches ++ [fact, node-id],            matches ++ [fact, node-id],
+        bindings ∪ element-bindings)           bindings ∪ element-bindings)
+           │                                      │
+           ▼                                      ▼
+    send-tokens to children                send-tokens to children
+....
+
+=== Memory Model
+
+Working memory uses two representations:
+
+* **`PersistentLocalMemory`** — immutable snapshot, held by the session between `fire-rules` calls
+* **`TransientLocalMemory`** — mutable, used within a single `fire-rules` invocation for performance
+
+....
+  TransientLocalMemory
+  ├── alpha-memory:      {node-id → {bindings → [Element ...]}}
+  ├── beta-memory:       {node-id → {bindings → [Token ...]}}
+  ├── accum-memory:      {node-id → {join-bindings → {fact-bindings → result}}}
+  ├── production-memory: {node-id → {token → [inserted-facts]}}
+  └── activation-map:    {group-key → PriorityQueue<Activation>}
+....
+
+The activation queue is organized by **activation groups** (salience/priority).
+Within a group, activations are ordered by rule definition order.
+
+=== Session & fire-rules
+
+Sessions (`LocalSession`) are **immutable values**.
+`insert`/`retract` return new sessions with queued `PendingUpdate` operations.
+`fire-rules` processes them:
+
+....
+  fire-rules(session)
+      │
+      ▼
+  1. to-transient(memory)
+      │
+      ▼
+  2. Process pending operations
+     ├── insertions: alpha-activate each fact through alpha roots
+     └── retractions: alpha-retract each fact through alpha roots
+      │
+      ▼
+  3. fire-rules* loop ◄───────────────────────────────┐
+      │                                                │
+      ├── pop-activation! from highest-priority group  │
+      │         │                                      │
+      │         ▼                                      │
+      │    Execute rule RHS:                           │
+      │      ((:rhs node) token env)                   │
+      │         │                                      │
+      │         ├── collect batched insertions          │
+      │         │   (logical & unconditional)           │
+      │         ├── collect batched retractions         │
+      │         │                                      │
+      │         ▼                                      │
+      │    flush-insertions! / flush-rhs-retractions!  │
+      │         │                                      │
+      │         └── propagate through network ─────────┘
+      │                (may create new activations)
+      │
+      ├── On group transition: flush-updates
+      │   (propagate batched alpha inserts/retracts)
+      │
+      └── No activations left?
+            ├── flush-updates → new activations? loop ─┘
+            └── no → done, to-persistent!(memory)
+....
+
+==== Truth Maintenance
+
+* `insert!` (inside rule RHS) — **logical insertion**. The engine tracks which rule/token produced each fact.
+  If the rule's conditions later become false, the inserted facts are automatically retracted.
+* `insert-unconditional!` — persists regardless of rule truth.
+* Retractions cascade transitively: retracting a fact may invalidate rules, which retracts their logical insertions, which may invalidate further rules.
+
+== Implemented Optimizations (Phase 1-2)
+
+=== 1.1 — `drop-one-of` Vector Optimization
+
+**File:** `accumulators.cljc` | **Impact:** Reduced allocation in accumulator retraction
+
+The `all` accumulator collects matching facts into a vector.
+On retraction, one instance of the retracted fact must be removed.
+The original implementation used lazy sequence operations (`take-while` / `drop-while`), which allocate intermediate seqs even for the common case of vector collections.
+
+.Before
+[source,clojure]
+----
+(defn- drop-one-of [items value]
+  (let [pred #(not= value %)]
+    (into (empty items) cat
+      [(take-while pred items)
+       (rest (drop-while pred items))])))
+----
+
+.After
+[source,clojure]
+----
+(defn- drop-one-of [items value]
+  (if (vector? items)
+    (let [n (count items)
+          idx (loop [i 0]
+                (cond
+                  (>= i n) -1
+                  (= value (items i)) i
+                  :else (recur (inc i))))]
+      (if (neg? idx)
+        items
+        (into (subvec items 0 idx) (subvec items (inc idx)))))
+    ;; Non-vector fallback
+    (let [pred #(not= value %)]
+      (into (empty items) cat
+        [(take-while pred items)
+         (rest (drop-while pred items))]))))
+----
+
+The vector path uses `subvec` (O(1) view creation) and a single `into` to concatenate, avoiding lazy seq machinery entirely.
+
+=== 1.2 — `do-accumulate` 3-Arity (Avoid Record Allocation)
+
+**File:** `engine.cljc` | **Impact:** Eliminated per-accumulation `Accumulator` record allocation
+
+When accumulating over new facts with a known previous result, the engine previously created a new `Accumulator` record via `(assoc accumulator :initial-value previous-result)` just to pass the initial value.
+A 3-arity `do-accumulate` accepts the initial value directly:
+
+[source,clojure]
+----
+(defn- do-accumulate
+  "Two-arity uses the accumulator's initial-value;
+   three-arity uses the provided initial value
+   to avoid allocating a new Accumulator record."
+  ([accumulator facts]
+   (r/reduce (:reduce-fn accumulator)
+             (:initial-value accumulator)
+             facts))
+  ([accumulator initial-value facts]
+   (r/reduce (:reduce-fn accumulator)
+             initial-value
+             facts)))
+----
+
+Call sites in `AccumulateNode` and `AccumulateWithJoinFilterNode` now pass the previous result directly instead of allocating a modified record.
+
+=== 1.3 — Listener Null-Check Short-Circuit
+
+**File:** `engine.cljc` | **Impact:** Eliminated allocation and protocol dispatch when no listener is attached
+
+Most production sessions run without a tracing listener.
+Before this optimization, `AlphaNode.alpha-activate` always evaluated `(map first fact-binding-pairs)` to pass to the listener, even when no listener was present.
+
+[source,clojure]
+----
+;; AlphaNode.alpha-activate — guarded listener call
+(when-not (l/null-listener? listener)
+  (l/alpha-activate! listener node (map first fact-binding-pairs)))
+----
+
+The `null-listener?` check is O(1) and avoids:
+
+* Allocating a lazy seq via `(map first ...)`
+* Protocol dispatch on the no-op listener
+* Same pattern applied to `alpha-retract` and `retract-facts-loop`
+
+=== 2.1 — Join Node Unlinking
+
+**File:** `engine.cljc` | **Impact:** Eliminated empty cross-products
+
+When a join node is activated from one side but no data exists on the other side, the cross-product is vacuously empty.
+Previously the engine would still enter the `eager-for` comprehension, allocate an empty result, and call `send-tokens`.
+Now a `when-let` guard short-circuits:
+
+[source,clojure]
+----
+;; HashJoinNode.left-activate
+(mem/add-tokens! memory node join-bindings tokens)
+(l/left-activate! listener node tokens)
+;; Short-circuit: skip cross-product when no elements exist
+(when-let [elements (seq (mem/get-elements memory node join-bindings))]
+  (send-tokens transport memory listener children
+    (platform/eager-for [element elements, token tokens ...]
+      (->Token ...))))
+----
+
+Applied to all four methods on `HashJoinNode` (`left-activate`, `left-retract`, `right-activate`, `right-retract`) and the corresponding methods on `ExpressionJoinNode`.
+
+This is especially impactful in sparse networks where many nodes exist but few are active simultaneously.
+
+=== 2.3 — OrderedUpdateCache Mutable Collections
+
+**File:** `update_cache/core.cljc` | **Impact:** Removed atom CAS overhead in fire-rules loop
+
+The `OrderedUpdateCache` batches insertions and retractions during rule firing before flushing them to the alpha network.
+The original implementation used an `atom` with persistent vectors, incurring compare-and-swap overhead on every update — unnecessary since `fire-rules*` is single-threaded.
+
+.CLJ — ArrayList
+[source,clojure]
+----
+(deftype OrderedUpdateCache [^:unsynchronized-mutable ^ArrayList updates]
+  UpdateCache
+  (add-insertions! [this facts]
+    (.add updates (->PendingUpdate :insert facts)))
+  (add-retractions! [this facts]
+    (.add updates (->PendingUpdate :retract facts)))
+  (get-updates-and-reset! [this]
+    (let [current-updates (Collections/unmodifiableList updates)]
+      (set! updates (ArrayList.))
+      (partition-by :type current-updates))))
+----
+
+.CLJS — mutable field with vector
+[source,clojure]
+----
+(deftype OrderedUpdateCache [^:mutable updates]
+  UpdateCache
+  (add-insertions! [this facts]
+    (set! updates (conj updates (->PendingUpdate :insert facts))))
+  (add-retractions! [this facts]
+    (set! updates (conj updates (->PendingUpdate :retract facts))))
+  (get-updates-and-reset! [this]
+    (let [current-updates updates]
+      (set! updates [])
+      (partition-by :type current-updates))))
+----
+
+This follows the precedent set by `CancellingUpdateCache`, which already used mutable Java collections.
+
+== Proposed Optimizations (Phase 2-3)
+
+The following optimizations have been identified but not yet implemented.
+
+=== 2.2 — Alpha Discrimination Tree
+
+**Files:** `compiler.clj`, `engine.cljc` | **Phase:** 2
+
+Currently each `AlphaNode` independently evaluates its condition against every fact of the matching type.
+When many rules share overlapping conditions on the same type, this duplicates work.
+
+An **alpha discrimination tree** (also called an alpha discrimination network) shares common prefixes:
+
+....
+  Facts of type Temperature
+              │
+              ▼
+     ┌─── field :value ───┐
+     │                     │
+     ▼                     ▼
+   > 100?               > 50?
+     │                     │
+     ├── > 150?            └── AlphaNode-B
+     │     │
+     │     └── AlphaNode-C
+     │
+     └── AlphaNode-A
+....
+
+**Approach:**
+
+1. Analyze alpha-node conditions at compile time to identify shared field access patterns
+2. Build a trie where internal nodes test field values and leaves are alpha nodes
+3. Traverse the trie once per fact instead of evaluating each alpha node independently
+
+**Expected benefit:** Reduces per-fact alpha evaluation from O(N~nodes~) to O(depth~trie~). Most impactful when many rules pattern-match on the same fact type with overlapping field constraints.
+
+=== 2.4 — Beta Sub-Indexing for ExpressionJoinNode
+
+**Files:** `compiler.clj`, `engine.cljc` | **Phase:** 2
+
+`ExpressionJoinNode` uses a `join-filter-fn` that is applied to every (token, element) pair.
+When the filter contains an equality sub-expression (e.g., `(= (:id ?order) (:order-id fact))`), this equality can be extracted at compile time and used as a hash index, reducing the pairs evaluated by the filter.
+
+....
+  Current ExpressionJoinNode:
+    tokens × elements → filter each pair → O(T × E)
+
+  With sub-indexing:
+    tokens × elements[matching-key] → filter each pair → O(T × E')
+    where E' ≪ E when key is selective
+....
+
+**Approach:**
+
+1. At compile time, analyze `join-filter-fn` for extractable equality expressions
+2. Generate a compound key from these expressions
+3. Index elements by this key in alpha-memory
+4. At join time, compute the key from the token and look up only matching elements
+5. Apply the remaining non-equality portion of the filter to the reduced set
+
+=== 3.1 — Lazy/Demand-Driven Evaluation (PHREAK-Inspired)
+
+**Phase:** 3
+
+Classic Rete eagerly propagates every change through the entire network.
+The PHREAK algorithm (used in Drools) instead propagates lazily — nodes only evaluate when downstream demand exists (i.e., a production node could potentially fire).
+
+....
+  Eager Rete (current):
+    insert fact → propagate through ALL matching paths immediately
+
+  Lazy/PHREAK:
+    insert fact → mark paths as dirty
+    fire-rules → walk dirty paths top-down, evaluate only what's needed
+....
+
+**Key ideas:**
+
+* Maintain a dirty/stale flag per node segment
+* On `fire-rules`, traverse from production nodes backward, pulling data through the network
+* Skip evaluation for entire sub-networks that cannot produce new activations
+* Particularly beneficial for sessions with many rules but few active at any time
+
+**Considerations:**
+
+* Significant architectural change — touches session model, memory, and all node types
+* Must preserve correctness of truth maintenance under lazy evaluation
+* Negation and accumulation semantics need careful handling
+
+=== 3.2 — Collection-Oriented Batch Joins
+
+**Phase:** 3
+
+Currently, join nodes process one token or element at a time (even though the API accepts collections).
+A batch join processes sets of tokens against sets of elements in a single operation, enabling:
+
+* Vectorized hash lookups
+* Reduced per-item overhead (function call, protocol dispatch)
+* Potential for SIMD-friendly data layouts
+
+....
+  Current:
+    for token in tokens:
+      for element in elements:
+        if join-matches?(token, element):
+          emit new-token
+
+  Batch:
+    group tokens by join-key
+    group elements by join-key
+    for each shared key:
+      cross-product(token-group, element-group)
+....
+
+=== 3.3 — Incremental Truth Maintenance via Delta Propagation
+
+**Phase:** 3
+
+Currently, when a logical insertion is invalidated, the engine retracts the fact and re-evaluates downstream from scratch.
+Delta propagation would instead compute the _difference_ between old and new states and propagate only the delta.
+
+....
+  Current retraction cascade:
+    rule invalidated → retract all logical facts → re-derive from scratch
+
+  Delta propagation:
+    rule invalidated → compute Δ(old-facts, new-facts) → propagate only changes
+....
+
+**Expected benefit:** Reduces redundant work when a rule's match set changes slightly (e.g., one of many matching facts is retracted, but the accumulated result is unchanged).
+
+== Optimization Summary
+
+[cols="1,3,2,1"]
+|===
+|ID |Optimization |File(s) |Status
+
+|1.1
+|`drop-one-of` vector optimization
+|`accumulators.cljc`
+|✓ Done
+
+|1.2
+|`do-accumulate` 3-arity
+|`engine.cljc`
+|✓ Done
+
+|1.3
+|Listener null-check short-circuit
+|`engine.cljc`
+|✓ Done
+
+|2.1
+|Join node unlinking
+|`engine.cljc`
+|✓ Done
+
+|2.3
+|OrderedUpdateCache mutable collections
+|`update_cache/core.cljc`
+|✓ Done
+
+|2.2
+|Alpha discrimination tree
+|`compiler.clj`, `engine.cljc`
+|Proposed
+
+|2.4
+|Beta sub-indexing for ExpressionJoinNode
+|`compiler.clj`, `engine.cljc`
+|Proposed
+
+|3.1
+|Lazy/demand-driven evaluation (PHREAK)
+|`engine.cljc`, `memory.cljc`
+|Proposed
+
+|3.2
+|Collection-oriented batch joins
+|`engine.cljc`
+|Proposed
+
+|3.3
+|Incremental truth maintenance (delta propagation)
+|`engine.cljc`, `memory.cljc`
+|Proposed
+|===
