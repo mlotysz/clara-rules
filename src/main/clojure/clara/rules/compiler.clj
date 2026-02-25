@@ -1824,6 +1824,9 @@
                                  #{}
                                  (ancestors-fn fact-type)))
 
+        fused-id-counter (atom 0)
+        fused-id-fn (fn [] (swap! fused-id-counter inc))
+
         fact-type->roots (memoize
                           (fn [fact-type]
                             ;; There is no inherent ordering here but we put the AlphaRootsWrapper instances
@@ -1836,7 +1839,8 @@
                                   ;; removing groups with no alpha nodes here will improve performance on subsequent calls
                                   ;; to the get-alphas-fn with the same fact type.
                                   (keep #(when-let [roots (not-empty (get alpha-roots %))]
-                                           (AlphaRootsWrapper. % (hash %) roots)))
+                                           (AlphaRootsWrapper. % (hash %)
+                                                               (eng/fuse-alpha-nodes fused-id-fn roots))))
                                   ;; If a user-provided ancestors-fn returns a sorted collection, for example for
                                   ;; ensuring determinism, we respect that ordering here by conj'ing on to the existing
                                   ;; collection.
