@@ -32,6 +32,13 @@
 ;; Token with no bindings, used as the root of beta nodes.
 (def empty-token (->Token [] {}))
 
+;; Creates a [fact node-id] match pair for Token :matches vectors.
+;; On the JVM, MapEntry is ~32 bytes vs ~96 bytes for a 2-element PersistentVector,
+;; while supporting the same destructuring, nth, first/second, seq, and equality.
+(defn- match-pair [fact node-id]
+  #?(:clj (clojure.lang.MapEntry/create fact node-id)
+     :cljs [fact node-id]))
+
 ;; Record indicating the negation existing in the working memory.
 ;;
 ;; Determining if an object is an instance of a class is a primitive
@@ -392,7 +399,7 @@
           ;; has a matching previous activation.
           token-insertion-map (mem/remove-insertions! memory node unremoved-tokens)]
 
-      (when-let [insertions (seq (apply concat (vals token-insertion-map)))]
+      (when-let [insertions (not-empty (into [] cat (vals token-insertion-map)))]
         ;; If there is current session with rules firing, add these items to the queue
         ;; to be retracted so they occur in the same order as facts being inserted.
         (cond
@@ -539,7 +546,7 @@
   (alpha-activate [node facts memory transport listener]
     (let [fact-binding-pairs (alpha-node-matches facts env activation node)]
       (when-not (l/null-listener? listener)
-        (l/alpha-activate! listener node (map first fact-binding-pairs)))
+        (l/alpha-activate! listener node (mapv first fact-binding-pairs)))
       (send-elements
        transport
        memory
@@ -551,7 +558,7 @@
   (alpha-retract [node facts memory transport listener]
     (let [fact-binding-pairs (alpha-node-matches facts env activation node)]
       (when-not (l/null-listener? listener)
-        (l/alpha-retract! listener node (map first fact-binding-pairs)))
+        (l/alpha-retract! listener node (mapv first fact-binding-pairs)))
       (retract-elements
         transport
         memory
@@ -672,7 +679,7 @@
      listener
      children
      (platform/eager-for [{:keys [fact bindings] :as element} elements]
-                         (->Token [[fact (:id node)]] bindings))))
+                         (->Token [(match-pair fact id)] bindings))))
 
   (right-retract [node join-bindings elements memory transport listener]
 
@@ -685,7 +692,7 @@
      listener
      children
      (platform/eager-for [{:keys [fact bindings] :as element} (mem/remove-elements! memory node join-bindings elements)]
-                         (->Token [[fact (:id node)]] bindings))))
+                         (->Token [(match-pair fact id)] bindings))))
 
   IConditionNode
   (get-condition-description [this]
@@ -712,7 +719,7 @@
                             token tokens
                             :let [fact (:fact element)
                                   fact-binding (:bindings element)]]
-                           (->Token (conj (:matches token) [fact id]) (conj fact-binding (:bindings token)))))))
+                           (->Token (conj (:matches token) (match-pair fact id)) (conj fact-binding (:bindings token)))))))
 
   (left-retract [node join-bindings tokens memory transport listener]
     (l/left-retract! listener node tokens)
@@ -728,7 +735,7 @@
                               element elements
                               :let [fact (:fact element)
                                     fact-bindings (:bindings element)]]
-                             (->Token (conj (:matches token) [fact id]) (conj fact-bindings (:bindings token))))))))
+                             (->Token (conj (:matches token) (match-pair fact id)) (conj fact-bindings (:bindings token))))))))
 
   (get-join-keys [node] binding-keys)
 
@@ -747,7 +754,7 @@
        children
        (platform/eager-for [token tokens
                             {:keys [fact bindings] :as element} elements]
-                           (->Token (conj (:matches token) [fact id]) (conj (:bindings token) bindings))))))
+                           (->Token (conj (:matches token) (match-pair fact id)) (conj (:bindings token) bindings))))))
 
   (right-retract [node join-bindings elements memory transport listener]
     (l/right-retract! listener node elements)
@@ -761,7 +768,7 @@
          children
          (platform/eager-for [{:keys [fact bindings] :as element} removed-elements
                               token tokens]
-                             (->Token (conj (:matches token) [fact id]) (conj (:bindings token) bindings)))))))
+                             (->Token (conj (:matches token) (match-pair fact id)) (conj (:bindings token) bindings)))))))
 
   IConditionNode
   (get-condition-description [this]
@@ -799,7 +806,7 @@
                                   fact-binding (:bindings element)
                                   beta-bindings (join-node-matches node join-filter-fn token fact fact-binding {})]
                             :when beta-bindings]
-                           (->Token (conj (:matches token) [fact id])
+                           (->Token (conj (:matches token) (match-pair fact id))
                                     (conj fact-binding (:bindings token) beta-bindings))))))
 
   (left-retract [node join-bindings tokens memory transport listener]
@@ -818,7 +825,7 @@
                                     fact-bindings (:bindings element)
                                     beta-bindings (join-node-matches node join-filter-fn token fact fact-bindings {})]
                               :when beta-bindings]
-                             (->Token (conj (:matches token) [fact id])
+                             (->Token (conj (:matches token) (match-pair fact id))
                                       (conj fact-bindings (:bindings token) beta-bindings)))))))
 
   (get-join-keys [node] binding-keys)
@@ -840,7 +847,7 @@
                             {:keys [fact bindings] :as element} elements
                             :let [beta-bindings (join-node-matches node join-filter-fn token fact bindings {})]
                             :when beta-bindings]
-                           (->Token (conj (:matches token) [fact id])
+                           (->Token (conj (:matches token) (match-pair fact id))
                                     (conj (:bindings token) bindings beta-bindings))))))
 
   (right-retract [node join-bindings elements memory transport listener]
@@ -857,7 +864,7 @@
                               token tokens
                               :let [beta-bindings (join-node-matches node join-filter-fn token fact bindings {})]
                               :when beta-bindings]
-                             (->Token (conj (:matches token) [fact id])
+                             (->Token (conj (:matches token) (match-pair fact id))
                                       (conj (:bindings token) bindings beta-bindings)))))))
 
   IConditionNode
@@ -1092,12 +1099,9 @@
 (defn- retract-accumulated
   "Helper function to retract an accumulated value."
   [node accum-condition accumulator result-binding token converted-result fact-bindings transport memory listener]
-  (let [new-facts (conj (:matches token) [converted-result (:id node)])
-        new-bindings (merge (:bindings token)
-                            fact-bindings
-                            (when result-binding
-                              { result-binding
-                                converted-result}))]
+  (let [new-facts (conj (:matches token) (match-pair converted-result (:id node)))
+        new-bindings (cond-> (conj (:bindings token) fact-bindings)
+                       result-binding (assoc result-binding converted-result))]
 
     (retract-tokens transport memory listener (:children node)
                     [(->Token new-facts new-bindings)])))
@@ -1105,11 +1109,8 @@
 (defn- send-accumulated
   "Helper function to send the result of an accumulated value to the node's children."
   [node accum-condition accumulator result-binding token converted-result fact-bindings transport memory listener]
-  (let [new-bindings (merge (:bindings token)
-                            fact-bindings
-                            (when result-binding
-                              { result-binding
-                               converted-result}))
+  (let [new-bindings (cond-> (conj (:bindings token) fact-bindings)
+                       result-binding (assoc result-binding converted-result))
 
         ;; This is to check that the produced accumulator result is
         ;; consistent with any variable from another rule condition
@@ -1122,7 +1123,7 @@
               (= previous-result converted-result))
 
       (send-tokens transport memory listener (:children node)
-                   [(->Token (conj (:matches token) [converted-result (:id node)]) new-bindings)]))))
+                   [(->Token (conj (:matches token) (match-pair converted-result (:id node))) new-bindings)]))))
 
 ;; The AccumulateNode hosts Accumulators, a Rete extension described above, in the Rete network.
 ;; It behaves similarly to a JoinNode, but performs an accumulation function on the incoming
