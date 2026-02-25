@@ -76,12 +76,3 @@
               :version version
               :jar-file jar-file
               :class-dir class-dir}))
-
-(defn deploy
-  "Deploy to Clojars. Set CLOJARS_USERNAME and CLOJARS_PASSWORD env vars."
-  [_]
-  (jar nil)
-  ((requiring-resolve 'deps-deploy.deps-deploy/deploy)
-   {:installer :remote
-    :artifact (b/resolve-path jar-file)
-    :pom-file (b/pom-path {:lib lib :class-dir class-dir})}))
