@@ -144,12 +144,12 @@
       (activation-group-transition! child original-group new-group)))
 
   (to-persistent! [listener]
-    (delegating-listener (map to-persistent! children))))
+    (delegating-listener (mapv to-persistent! children))))
 
 (deftype PersistentDelegatingListener [children]
   IPersistentEventListener
   (to-transient [listener]
-    (DelegatingListener. (map to-transient children))))
+    (DelegatingListener. (mapv to-transient children))))
 
 (defn delegating-listener
   "Returns a listener that delegates to its children."

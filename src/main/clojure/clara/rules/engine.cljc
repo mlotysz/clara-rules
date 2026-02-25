@@ -240,8 +240,8 @@
 ;; The value is expected to be an atom holding such facts.
 (def ^:dynamic *pending-external-retractions* nil)
 
-;; The token that triggered a rule to fire.
-(def ^:dynamic *rule-context* nil)
+;; The per-activation rule context, stored as a volatile on *current-session*
+;; rather than a dynamic binding to avoid pushThreadBindings/popThreadBindings overhead.
 
 (defn ^:private external-retract-loop
   "Retract all facts, then group and retract all facts that must be logically retracted because of these
@@ -294,15 +294,16 @@
   "Place facts in a stateful cache to be inserted into the session
   immediately after the RHS of a rule fires."
   [facts unconditional]
-  (if unconditional
-    (vswap! (:batched-unconditional-insertions *rule-context*) into facts)
-    (vswap! (:batched-logical-insertions *rule-context*) into facts)))
+  (let [rule-context @(:rule-context *current-session*)]
+    (if unconditional
+      (vswap! (:batched-unconditional-insertions rule-context) into facts)
+      (vswap! (:batched-logical-insertions rule-context) into facts))))
 
 (defn rhs-retract-facts!
   "Place all facts retracted in the RHS in a buffer to be retracted after
    the eval'ed RHS function completes."
   [facts]
-  (vswap! (:batched-rhs-retractions *rule-context*) into facts))
+  (vswap! (:batched-rhs-retractions @(:rule-context *current-session*)) into facts))
 
 (defn ^:private flush-rhs-retractions!
   "Retract all facts retracted in the RHS after the eval'ed RHS function completes.
@@ -310,7 +311,7 @@
   It should not be used for retractions that occur as part of automatic truth maintenance."
   [facts]
   (let [{:keys [rulebase transient-memory transport insertions get-alphas-fn listener]} *current-session*
-        {:keys [node token]} *rule-context*]
+        {:keys [node token]} @(:rule-context *current-session*)]
     ;; Update the count so the rule engine will know when we have normalized.
     (vswap! insertions + (count facts))
 
@@ -327,7 +328,7 @@
    be called once per rule activation for logical insertions."
   [facts unconditional]
   (let [{:keys [rulebase transient-memory transport insertions get-alphas-fn listener]} *current-session*
-        {:keys [node token]} *rule-context*]
+        {:keys [node token]} @(:rule-context *current-session*)]
 
     ;; Update the insertion count.
     (vswap! insertions + (count facts))
@@ -360,7 +361,7 @@
     ;; Fire the rule if it's not a no-loop rule, or if the rule is not
     ;; active in the current context.
     (when (or (not (get-in production [:props :no-loop]))
-              (not (= production (get-in *rule-context* [:node :production]))))
+              (not (= production (some-> *current-session* :rule-context deref :node :production))))
 
       (let [activations (platform/eager-for [token tokens]
                                             (->Activation node token))]
@@ -410,7 +411,7 @@
           ;; Retract facts that have become untrue, unless they became untrue
           ;; because of an activation of the current rule that is :no-loop
           (when (or (not (get-in production [:props :no-loop]))
-                    (not (= production (get-in *rule-context* [:node :production]))))
+                    (not (= production (some-> *current-session* :rule-context deref :node :production))))
             (do
               ;; Notify the listener of logical retractions.
               ;; Note that this notification happens immediately, while the
@@ -719,7 +720,7 @@
                             token tokens
                             :let [fact (:fact element)
                                   fact-binding (:bindings element)]]
-                           (->Token (conj (:matches token) (match-pair fact id)) (conj fact-binding (:bindings token)))))))
+                           (->Token (conj (:matches token) (match-pair fact id)) (conj (:bindings token) fact-binding))))))
 
   (left-retract [node join-bindings tokens memory transport listener]
     (l/left-retract! listener node tokens)
@@ -735,7 +736,7 @@
                               element elements
                               :let [fact (:fact element)
                                     fact-bindings (:bindings element)]]
-                             (->Token (conj (:matches token) (match-pair fact id)) (conj fact-bindings (:bindings token))))))))
+                             (->Token (conj (:matches token) (match-pair fact id)) (conj (:bindings token) fact-bindings)))))))
 
   (get-join-keys [node] binding-keys)
 
@@ -807,7 +808,7 @@
                                   beta-bindings (join-node-matches node join-filter-fn token fact fact-binding {})]
                             :when beta-bindings]
                            (->Token (conj (:matches token) (match-pair fact id))
-                                    (conj fact-binding (:bindings token) beta-bindings))))))
+                                    (conj (:bindings token) fact-binding beta-bindings))))))
 
   (left-retract [node join-bindings tokens memory transport listener]
     (l/left-retract! listener node tokens)
@@ -826,7 +827,7 @@
                                     beta-bindings (join-node-matches node join-filter-fn token fact fact-bindings {})]
                               :when beta-bindings]
                              (->Token (conj (:matches token) (match-pair fact id))
-                                      (conj fact-bindings (:bindings token) beta-bindings)))))))
+                                      (conj (:bindings token) fact-bindings beta-bindings)))))))
 
   (get-join-keys [node] binding-keys)
 
@@ -924,9 +925,10 @@
 (defn- matches-some-facts?
   "Returns true if the given token matches one or more of the given elements."
   [node token elements join-filter-fn condition]
-  (some (fn [{:keys [fact bindings]}]
-          (join-node-matches node join-filter-fn token fact bindings (:env condition)))
-        elements))
+  (let [env (:env condition)]
+    (some (fn [e]
+            (join-node-matches node join-filter-fn token (:fact e) (:bindings e) env))
+          elements)))
 
 ;; A specialization of the NegationNode that supports additional tests
 ;; that have to occur on the beta side of the network. The key difference between this and the simple
@@ -1496,7 +1498,7 @@
 (defn- filter-accum-facts
   "Run a filter on elements against a given token for constraints that are not simple hash joins."
   [node join-filter-fn token candidate-facts bindings]
-  (filter #(join-node-matches node join-filter-fn token % bindings {}) candidate-facts))
+  (filterv #(join-node-matches node join-filter-fn token % bindings {}) candidate-facts))
 
 ;; A specialization of the AccumulateNode that supports additional tests
 ;; that have to occur on the beta side of the network. The key difference between this and the simple
@@ -1622,7 +1624,7 @@
     ;; depends on the values from parent facts, so we defer actually running the accumulator
     ;; until we have a token.
     (platform/eager-for [[bindings element-group] (platform/group-by-seq :bindings elements)]
-                        [bindings (map :fact element-group)]))
+                        [bindings (mapv :fact element-group)]))
 
   (right-activate-reduced [node join-bindings binding-candidates-seq memory transport listener]
 
@@ -1872,113 +1874,122 @@
 (defn fire-rules*
   "Fire rules for the given nodes."
   [rulebase nodes transient-memory transport listener get-alphas-fn update-cache]
-  (binding [*current-session* {:rulebase rulebase
-                               :transient-memory transient-memory
-                               :transport transport
-                               :insertions (volatile! 0)
-                               :get-alphas-fn get-alphas-fn
-                               :pending-updates update-cache
-                               :listener listener}]
+  ;; Hoist per-activation volatiles before the loop to avoid re-allocating them on every activation.
+  ;; They are vreset! to [] before each RHS call.
+  (let [batched-logical-insertions (volatile! [])
+        batched-unconditional-insertions (volatile! [])
+        batched-rhs-retractions (volatile! [])
+        rule-context (volatile! nil)
+        null-listener (l/null-listener? listener)]
+    (binding [*current-session* {:rulebase rulebase
+                                 :transient-memory transient-memory
+                                 :transport transport
+                                 :insertions (volatile! 0)
+                                 :get-alphas-fn get-alphas-fn
+                                 :pending-updates update-cache
+                                 :listener listener
+                                 :rule-context rule-context}]
 
-    (loop [next-group (mem/next-activation-group transient-memory)
-           last-group nil]
+      (loop [next-group (mem/next-activation-group transient-memory)
+             last-group nil]
 
-      (if next-group
+        (if next-group
 
-        (if (and last-group (not= last-group next-group))
+          (if (and last-group (not= last-group next-group))
 
-          ;; We have changed groups, so flush the updates from the previous
-          ;; group before continuing.
-          (do
-            (flush-updates *current-session*)
-            (let [upcoming-group (mem/next-activation-group transient-memory)]
-              (l/activation-group-transition! listener next-group upcoming-group)
-              (recur upcoming-group next-group)))
+            ;; We have changed groups, so flush the updates from the previous
+            ;; group before continuing.
+            (do
+              (flush-updates *current-session*)
+              (let [upcoming-group (mem/next-activation-group transient-memory)]
+                (l/activation-group-transition! listener next-group upcoming-group)
+                (recur upcoming-group next-group)))
 
-          (do
+            (do
 
-            ;; If there are activations, fire them.
-            (when-let [{:keys [node token] :as activation} (mem/pop-activation! transient-memory)]
-              ;; Use vectors for the insertion caches so that within an insertion type
-              ;; (unconditional or logical) all insertions are done in order after the into
-              ;; calls in insert-facts!.  This shouldn't have a functional impact, since any ordering
-              ;; should be valid, but makes traces less confusing to end users.  It also prevents any laziness
-              ;; in the sequences.
-              (let [batched-logical-insertions (volatile! [])
-                    batched-unconditional-insertions (volatile! [])
-                    batched-rhs-retractions (volatile! [])]
-                (binding [*rule-context* (->RuleContext token node
-                                                              batched-logical-insertions
-                                                              batched-unconditional-insertions
-                                                              batched-rhs-retractions)]
+              ;; If there are activations, fire them.
+              (when-let [{:keys [node token] :as activation} (mem/pop-activation! transient-memory)]
+                ;; Use vectors for the insertion caches so that within an insertion type
+                ;; (unconditional or logical) all insertions are done in order after the into
+                ;; calls in insert-facts!.  This shouldn't have a functional impact, since any ordering
+                ;; should be valid, but makes traces less confusing to end users.  It also prevents any laziness
+                ;; in the sequences.
+                (vreset! batched-logical-insertions [])
+                (vreset! batched-unconditional-insertions [])
+                (vreset! batched-rhs-retractions [])
+                (vreset! rule-context (->RuleContext token node
+                                                     batched-logical-insertions
+                                                     batched-unconditional-insertions
+                                                     batched-rhs-retractions))
 
-                  ;; Fire the rule itself.
-                  (try
-                    ((:rhs node) token (:env (:production node)))
-                    ;; Don't do anything if a given insertion type has no corresponding
-                    ;; facts to avoid complicating traces.  Note that since each no RHS's of
-                    ;; downstream rules are fired here everything is governed by truth maintenance.
-                    ;; Therefore, the reordering of retractions and insertions should have no impact
-                    ;; assuming that the evaluation of rule conditions is pure, which is a general expectation
-                    ;; of the rules engine.
-                    ;;
-                    ;; Bind the contents of the cache atoms after the RHS is fired since they are used twice
-                    ;; below.  They will be dereferenced again if an exception is caught, but in the error
-                    ;; case we aren't worried about performance.
-                    (let [retrieved-unconditional-insertions @batched-unconditional-insertions
-                          retrieved-logical-insertions @batched-logical-insertions
-                          retrieved-rhs-retractions @batched-rhs-retractions]
+                ;; Fire the rule itself.
+                (try
+                  ((:rhs node) token (:env (:production node)))
+                  ;; Don't do anything if a given insertion type has no corresponding
+                  ;; facts to avoid complicating traces.  Note that since each no RHS's of
+                  ;; downstream rules are fired here everything is governed by truth maintenance.
+                  ;; Therefore, the reordering of retractions and insertions should have no impact
+                  ;; assuming that the evaluation of rule conditions is pure, which is a general expectation
+                  ;; of the rules engine.
+                  ;;
+                  ;; Bind the contents of the cache atoms after the RHS is fired since they are used twice
+                  ;; below.  They will be dereferenced again if an exception is caught, but in the error
+                  ;; case we aren't worried about performance.
+                  (let [retrieved-unconditional-insertions @batched-unconditional-insertions
+                        retrieved-logical-insertions @batched-logical-insertions
+                        retrieved-rhs-retractions @batched-rhs-retractions]
+                    (when-not null-listener
                       (l/fire-activation! listener
                                           activation
                                           {:unconditional-insertions retrieved-unconditional-insertions
                                            :logical-insertions retrieved-logical-insertions
-                                           :rhs-retractions retrieved-rhs-retractions})
-                      (when-let [batched (seq retrieved-unconditional-insertions)]
-                        (flush-insertions! batched true))
-                      (when-let [batched (seq retrieved-logical-insertions)]
-                        (flush-insertions! batched false))
-                      (when-let [batched (seq retrieved-rhs-retractions)]
-                        (flush-rhs-retractions! batched)))
-                    (catch #?(:clj Exception :cljs :default) e
+                                           :rhs-retractions retrieved-rhs-retractions}))
+                    (when-let [batched (seq retrieved-unconditional-insertions)]
+                      (flush-insertions! batched true))
+                    (when-let [batched (seq retrieved-logical-insertions)]
+                      (flush-insertions! batched false))
+                    (when-let [batched (seq retrieved-rhs-retractions)]
+                      (flush-rhs-retractions! batched)))
+                  (catch #?(:clj Exception :cljs :default) e
 
-                           ;; If the rule fired an exception, help debugging by attaching
-                           ;; details about the rule itself, cached insertions, and any listeners
-                           ;; while propagating the cause.
-                           (let [production (:production node)
-                                 rule-name (:name production)
-                                 rhs (:rhs production)]
-                             (throw (ex-info (str "Exception in " (if rule-name rule-name (pr-str rhs))
-                                                  " with bindings " (pr-str (:bindings token)))
-                                             {:bindings (:bindings token)
-                                              :name rule-name
-                                              :rhs rhs
-                                              :batched-logical-insertions @batched-logical-insertions
-                                              :batched-unconditional-insertions @batched-unconditional-insertions
-                                              :batched-rhs-retractions @batched-rhs-retractions
-                                              :listeners (try
-                                                           (let [p-listener (l/to-persistent! listener)]
-                                                             (if (l/null-listener? p-listener)
-                                                               []
-                                                               (l/get-children p-listener)))
-                                                           (catch #?(:clj Exception :cljs :default)
-                                                               listener-exception
-                                                             listener-exception))}
-                                             e)))))
+                         ;; If the rule fired an exception, help debugging by attaching
+                         ;; details about the rule itself, cached insertions, and any listeners
+                         ;; while propagating the cause.
+                         (let [production (:production node)
+                               rule-name (:name production)
+                               rhs (:rhs production)]
+                           (throw (ex-info (str "Exception in " (if rule-name rule-name (pr-str rhs))
+                                                " with bindings " (pr-str (:bindings token)))
+                                           {:bindings (:bindings token)
+                                            :name rule-name
+                                            :rhs rhs
+                                            :batched-logical-insertions @batched-logical-insertions
+                                            :batched-unconditional-insertions @batched-unconditional-insertions
+                                            :batched-rhs-retractions @batched-rhs-retractions
+                                            :listeners (try
+                                                         (let [p-listener (l/to-persistent! listener)]
+                                                           (if (l/null-listener? p-listener)
+                                                             []
+                                                             (l/get-children p-listener)))
+                                                         (catch #?(:clj Exception :cljs :default)
+                                                             listener-exception
+                                                           listener-exception))}
+                                           e)))))
 
-                  ;; Explicitly flush updates if we are in a no-loop rule, so the no-loop
-                  ;; will be in context for child rules.
-                  (when (some-> node :production :props :no-loop)
-                    (flush-updates *current-session*)))))
+                ;; Explicitly flush updates if we are in a no-loop rule, so the no-loop
+                ;; will be in context for child rules.
+                (when (some-> node :production :props :no-loop)
+                  (flush-updates *current-session*)))
 
-            (recur (mem/next-activation-group transient-memory) next-group)))
+              (recur (mem/next-activation-group transient-memory) next-group)))
 
-        ;; There were no items to be activated, so flush any pending
-        ;; updates and recur with a potential new activation group
-        ;; since a flushed item may have triggered one.
-        (when (flush-updates *current-session*)
-          (let [upcoming-group (mem/next-activation-group transient-memory)]
-            (l/activation-group-transition! listener next-group upcoming-group)
-            (recur upcoming-group next-group)))))))
+          ;; There were no items to be activated, so flush any pending
+          ;; updates and recur with a potential new activation group
+          ;; since a flushed item may have triggered one.
+          (when (flush-updates *current-session*)
+            (let [upcoming-group (mem/next-activation-group transient-memory)]
+              (l/activation-group-transition! listener next-group upcoming-group)
+              (recur upcoming-group next-group))))))))
 
 (deftype LocalSession [rulebase memory transport listener get-alphas-fn pending-operations]
   ISession
