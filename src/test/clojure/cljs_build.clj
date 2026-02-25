@@ -8,11 +8,16 @@
 (require 'clara.test-common)
 
 (def builds
-  {"simple"   {:output-to     "target/js/simple.js"
-               :optimizations :whitespace}
-   "advanced" {:output-to          "target/js/advanced.js"
+  {"simple"   {:output-to     "target/js/test-simple.js"
+               :target        :nodejs
+               :main          'clara.test
+               :optimizations :simple}
+   "advanced" {:output-to          "target/js/test-advanced.js"
+               :target             :nodejs
+               :main               'clara.test
                :anon-fn-naming-policy :mapped
-               :optimizations      :advanced}})
+               :optimizations      :advanced
+               :externs             ["src/test/clojurescript/externs.js"]}})
 
 (defn -main [& args]
   (let [build-id (or (first args) "simple")

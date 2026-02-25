@@ -16,7 +16,7 @@ jobs:
       uses: actions/setup-java@v4
       with:
         distribution: 'temurin'
-        java-version: '8'
+        java-version: '21'
 
     - name: Setup Clojure CLI
       uses: DeLaGuardo/setup-clojure@13.2
@@ -38,12 +38,6 @@ jobs:
         key: clj-deps-${{ hashFiles('deps.edn') }}
         restore-keys: clj-deps-
 
-    - name: Install Puppeteer
-      run: npm install puppeteer
-
-    - name: Install Chrome
-      run: npx puppeteer browsers install chrome
-
     - name: Compile Java sources
       run: clojure -T:build javac
 
@@ -57,13 +51,13 @@ jobs:
       run: clojure -M:cljs-test -m cljs-build simple
 
     - name: Run CLJS tests (simple)
-      run: node src/test/js/runner.js src/test/html/simple.html
+      run: node target/js/test-simple.js
 
     - name: Compile CLJS tests (advanced)
       run: clojure -M:cljs-test -m cljs-build advanced
 
     - name: Run CLJS tests (advanced)
-      run: node src/test/js/runner.js src/test/html/advanced.html
+      run: node target/js/test-advanced.js
 
     - name: Run clj-kondo linter
       run: |
