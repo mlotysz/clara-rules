@@ -12,7 +12,8 @@
                [clojure.test :refer [is]]))
    :cljs
    (ns clara.tools.testing-utils
-     (:require [clara.rules.update-cache.core :as uc])
+     (:require [clara.rules.update-cache.core :as uc]
+               [cljs.test])
      (:require-macros [clara.tools.testing-utils]
        [cljs.test :refer [is]])))
 
