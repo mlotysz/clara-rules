@@ -47,10 +47,12 @@
                      ;; Single update in this run — use its facts directly
                      (.add result [current-type (.-facts pu)])
                      ;; Multiple consecutive updates — concat their facts
-                     (let [facts (into (vec (.-facts pu))
-                                       cat
-                                       (map (fn [idx] (.-facts ^PendingUpdate (.get updates idx)))
-                                            (range (unchecked-inc-int i) end)))]
+                     (let [facts (loop [j (unchecked-inc-int i)
+                                        acc (transient (vec (.-facts pu)))]
+                                   (if (< j end)
+                                     (recur (unchecked-inc-int j)
+                                            (reduce conj! acc (.-facts ^PendingUpdate (.get updates j))))
+                                     (persistent! acc)))]
                        (.add result [current-type facts])))
                    (recur end))))
              (set! updates (ArrayList.))
