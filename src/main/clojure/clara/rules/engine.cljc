@@ -300,7 +300,7 @@
     ;; Update the count so the rule engine will know when we have normalized.
     (swap! insertions + (count facts))
 
-    (when listener
+    (when-not (l/null-listener? listener)
       (l/retract-facts! listener node token facts))
 
     (doseq [[alpha-roots fact-group] (get-alphas-fn facts)
@@ -531,7 +531,8 @@
   IAlphaActivate
   (alpha-activate [node facts memory transport listener]
     (let [fact-binding-pairs (alpha-node-matches facts env activation node)]
-      (l/alpha-activate! listener node (map first fact-binding-pairs))
+      (when-not (l/null-listener? listener)
+        (l/alpha-activate! listener node (map first fact-binding-pairs)))
       (send-elements
        transport
        memory
@@ -542,7 +543,8 @@
 
   (alpha-retract [node facts memory transport listener]
     (let [fact-binding-pairs (alpha-node-matches facts env activation node)]
-      (l/alpha-retract! listener node (map first fact-binding-pairs))
+      (when-not (l/null-listener? listener)
+        (l/alpha-retract! listener node (map first fact-binding-pairs)))
       (retract-elements
         transport
         memory
@@ -611,29 +613,34 @@
     ;; Add token to the node's working memory for future right activations.
     (mem/add-tokens! memory node join-bindings tokens)
     (l/left-activate! listener node tokens)
-    (send-tokens
-     transport
-     memory
-     listener
-     children
-     (platform/eager-for [element (mem/get-elements memory node join-bindings)
-                          token tokens
-                          :let [fact (:fact element)
-                                fact-binding (:bindings element)]]
-                         (->Token (conj (:matches token) [fact id]) (conj fact-binding (:bindings token))))))
+    ;; Short-circuit: skip cross-product when no elements exist for these bindings.
+    (when-let [elements (seq (mem/get-elements memory node join-bindings))]
+      (send-tokens
+       transport
+       memory
+       listener
+       children
+       (platform/eager-for [element elements
+                            token tokens
+                            :let [fact (:fact element)
+                                  fact-binding (:bindings element)]]
+                           (->Token (conj (:matches token) [fact id]) (conj fact-binding (:bindings token)))))))
 
   (left-retract [node join-bindings tokens memory transport listener]
     (l/left-retract! listener node tokens)
-    (retract-tokens
-     transport
-     memory
-     listener
-     children
-     (platform/eager-for [token (mem/remove-tokens! memory node join-bindings tokens)
-                          element (mem/get-elements memory node join-bindings)
-                          :let [fact (:fact element)
-                                fact-bindings (:bindings element)]]
-                         (->Token (conj (:matches token) [fact id]) (conj fact-bindings (:bindings token))))))
+    (let [removed-tokens (mem/remove-tokens! memory node join-bindings tokens)]
+      ;; Short-circuit: skip cross-product when no elements exist for these bindings.
+      (when-let [elements (seq (mem/get-elements memory node join-bindings))]
+        (retract-tokens
+         transport
+         memory
+         listener
+         children
+         (platform/eager-for [token removed-tokens
+                              element elements
+                              :let [fact (:fact element)
+                                    fact-bindings (:bindings element)]]
+                             (->Token (conj (:matches token) [fact id]) (conj fact-bindings (:bindings token))))))))
 
   (get-join-keys [node] binding-keys)
 
@@ -643,25 +650,30 @@
   (right-activate [node join-bindings elements memory transport listener]
     (mem/add-elements! memory node join-bindings elements)
     (l/right-activate! listener node elements)
-    (send-tokens
-     transport
-     memory
-     listener
-     children
-     (platform/eager-for [token (mem/get-tokens memory node join-bindings)
-                          {:keys [fact bindings] :as element} elements]
-                         (->Token (conj (:matches token) [fact id]) (conj (:bindings token) bindings)))))
+    ;; Short-circuit: skip cross-product when no tokens exist for these bindings.
+    (when-let [tokens (seq (mem/get-tokens memory node join-bindings))]
+      (send-tokens
+       transport
+       memory
+       listener
+       children
+       (platform/eager-for [token tokens
+                            {:keys [fact bindings] :as element} elements]
+                           (->Token (conj (:matches token) [fact id]) (conj (:bindings token) bindings))))))
 
   (right-retract [node join-bindings elements memory transport listener]
     (l/right-retract! listener node elements)
-    (retract-tokens
-     transport
-     memory
-     listener
-     children
-     (platform/eager-for [{:keys [fact bindings] :as element} (mem/remove-elements! memory node join-bindings elements)
-                          token (mem/get-tokens memory node join-bindings)]
-                         (->Token (conj (:matches token) [fact id]) (conj (:bindings token) bindings)))))
+    (let [removed-elements (mem/remove-elements! memory node join-bindings elements)]
+      ;; Short-circuit: skip cross-product when no tokens exist for these bindings.
+      (when-let [tokens (seq (mem/get-tokens memory node join-bindings))]
+        (retract-tokens
+         transport
+         memory
+         listener
+         children
+         (platform/eager-for [{:keys [fact bindings] :as element} removed-elements
+                              token tokens]
+                             (->Token (conj (:matches token) [fact id]) (conj (:bindings token) bindings)))))))
 
   IConditionNode
   (get-condition-description [this]
@@ -686,35 +698,40 @@
     ;; Add token to the node's working memory for future right activations.
     (mem/add-tokens! memory node join-bindings tokens)
     (l/left-activate! listener node tokens)
-    (send-tokens
-     transport
-     memory
-     listener
-     children
-     (platform/eager-for [element (mem/get-elements memory node join-bindings)
-                          token tokens
-                          :let [fact (:fact element)
-                                fact-binding (:bindings element)
-                                beta-bindings (join-node-matches node join-filter-fn token fact fact-binding {})]
-                          :when beta-bindings]
-                         (->Token (conj (:matches token) [fact id])
-                                  (conj fact-binding (:bindings token) beta-bindings)))))
+    ;; Short-circuit: skip cross-product when no elements exist for these bindings.
+    (when-let [elements (seq (mem/get-elements memory node join-bindings))]
+      (send-tokens
+       transport
+       memory
+       listener
+       children
+       (platform/eager-for [element elements
+                            token tokens
+                            :let [fact (:fact element)
+                                  fact-binding (:bindings element)
+                                  beta-bindings (join-node-matches node join-filter-fn token fact fact-binding {})]
+                            :when beta-bindings]
+                           (->Token (conj (:matches token) [fact id])
+                                    (conj fact-binding (:bindings token) beta-bindings))))))
 
   (left-retract [node join-bindings tokens memory transport listener]
     (l/left-retract! listener node tokens)
-    (retract-tokens
-     transport
-     memory
-     listener
-     children
-     (platform/eager-for [token (mem/remove-tokens! memory node join-bindings tokens)
-                          element (mem/get-elements memory node join-bindings)
-                          :let [fact (:fact element)
-                                fact-bindings (:bindings element)
-                                beta-bindings (join-node-matches node join-filter-fn token fact fact-bindings {})]
-                          :when beta-bindings]
-                         (->Token (conj (:matches token) [fact id])
-                                  (conj fact-bindings (:bindings token) beta-bindings)))))
+    (let [removed-tokens (mem/remove-tokens! memory node join-bindings tokens)]
+      ;; Short-circuit: skip cross-product when no elements exist for these bindings.
+      (when-let [elements (seq (mem/get-elements memory node join-bindings))]
+        (retract-tokens
+         transport
+         memory
+         listener
+         children
+         (platform/eager-for [token removed-tokens
+                              element elements
+                              :let [fact (:fact element)
+                                    fact-bindings (:bindings element)
+                                    beta-bindings (join-node-matches node join-filter-fn token fact fact-bindings {})]
+                              :when beta-bindings]
+                             (->Token (conj (:matches token) [fact id])
+                                      (conj fact-bindings (:bindings token) beta-bindings)))))))
 
   (get-join-keys [node] binding-keys)
 
@@ -724,31 +741,36 @@
   (right-activate [node join-bindings elements memory transport listener]
     (mem/add-elements! memory node join-bindings elements)
     (l/right-activate! listener node elements)
-    (send-tokens
-     transport
-     memory
-     listener
-     children
-     (platform/eager-for [token (mem/get-tokens memory node join-bindings)
-                          {:keys [fact bindings] :as element} elements
-                          :let [beta-bindings (join-node-matches node join-filter-fn token fact bindings {})]
-                          :when beta-bindings]
-                         (->Token (conj (:matches token) [fact id])
-                                  (conj (:bindings token) bindings beta-bindings)))))
+    ;; Short-circuit: skip cross-product when no tokens exist for these bindings.
+    (when-let [tokens (seq (mem/get-tokens memory node join-bindings))]
+      (send-tokens
+       transport
+       memory
+       listener
+       children
+       (platform/eager-for [token tokens
+                            {:keys [fact bindings] :as element} elements
+                            :let [beta-bindings (join-node-matches node join-filter-fn token fact bindings {})]
+                            :when beta-bindings]
+                           (->Token (conj (:matches token) [fact id])
+                                    (conj (:bindings token) bindings beta-bindings))))))
 
   (right-retract [node join-bindings elements memory transport listener]
     (l/right-retract! listener node elements)
-    (retract-tokens
-     transport
-     memory
-     listener
-     children
-     (platform/eager-for [{:keys [fact bindings] :as element} (mem/remove-elements! memory node join-bindings elements)
-                          token (mem/get-tokens memory node join-bindings)
-                          :let [beta-bindings (join-node-matches node join-filter-fn token fact bindings {})]
-                          :when beta-bindings]
-                         (->Token (conj (:matches token) [fact id])
-                                  (conj (:bindings token) bindings beta-bindings)))))
+    (let [removed-elements (mem/remove-elements! memory node join-bindings elements)]
+      ;; Short-circuit: skip cross-product when no tokens exist for these bindings.
+      (when-let [tokens (seq (mem/get-tokens memory node join-bindings))]
+        (retract-tokens
+         transport
+         memory
+         listener
+         children
+         (platform/eager-for [{:keys [fact bindings] :as element} removed-elements
+                              token tokens
+                              :let [beta-bindings (join-node-matches node join-filter-fn token fact bindings {})]
+                              :when beta-bindings]
+                             (->Token (conj (:matches token) [fact id])
+                                      (conj (:bindings token) bindings beta-bindings)))))))
 
   IConditionNode
   (get-condition-description [this]
@@ -967,11 +989,17 @@
     (into [:test] constraints)))
 
 (defn- do-accumulate
-  "Runs the actual accumulation.  Returns the accumulated value."
-  [accumulator facts]
-  (r/reduce (:reduce-fn accumulator)
-            (:initial-value accumulator)
-            facts))
+  "Runs the actual accumulation.  Returns the accumulated value.
+   Two-arity uses the accumulator's initial-value; three-arity uses the provided initial value
+   to avoid allocating a new Accumulator record."
+  ([accumulator facts]
+   (r/reduce (:reduce-fn accumulator)
+             (:initial-value accumulator)
+             facts))
+  ([accumulator initial-value facts]
+   (r/reduce (:reduce-fn accumulator)
+             initial-value
+             facts)))
 
 (defn- retract-accumulated
   "Helper function to retract an accumulated value."
@@ -1172,7 +1200,7 @@
                     ;; There are matches and there is a previous reduced value for the previous
                     ;; items.  So just add the new items to the accumulated value.
                     has-matches?
-                    (do-accumulate (assoc accumulator :initial-value previous-reduced) facts)
+                    (do-accumulate accumulator previous-reduced facts)
 
                     ;; There are no matches right now.  So do not perform any accumulations.
                     ;; If there are never matches, time will be saved by never reducing.
@@ -1560,15 +1588,15 @@
                     ;; prior to further modification of that memory will return the same result as here.  This is important since if we use
                     ;; something like acc/all to accumulate to and propagate [A B] if B is retracted we need to retract [A B] not [B A]; the latter won't
                     ;; actually retract anything, which would be invalid.
-                    accum-result (let [accum-previous-init (if (not= previous-accum-result-init ::no-previous-value)
-                                                             ;; If there was a previous result, use it as the initial value.
-                                                             (assoc accumulator :initial-value previous-accum-result)
-                                                             ;; If there was no previous result, use the default initial value.
-                                                             ;; Note that if there is a non-nil initial value but there are new binding
-                                                             ;; groups we consider there to have been no previous value, but we still want
-                                                             ;; to use the actual initial value, not nil.
-                                                             accumulator)]
-                                   (do-accumulate accum-previous-init new-filtered-facts))
+                    accum-result (if (not= previous-accum-result-init ::no-previous-value)
+                                   ;; If there was a previous result, use it as the initial value
+                                   ;; without allocating a new Accumulator record.
+                                   (do-accumulate accumulator previous-accum-result new-filtered-facts)
+                                   ;; If there was no previous result, use the default initial value.
+                                   ;; Note that if there is a non-nil initial value but there are new binding
+                                   ;; groups we consider there to have been no previous value, but we still want
+                                   ;; to use the actual initial value, not nil.
+                                   (do-accumulate accumulator new-filtered-facts))
 
                     previous-converted (when (some? previous-accum-result)
                                          (convert-return-fn previous-accum-result))
