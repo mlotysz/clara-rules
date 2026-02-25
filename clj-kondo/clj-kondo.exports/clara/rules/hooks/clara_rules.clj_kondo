@@ -287,16 +287,15 @@
                                 (vec production-output))))
         fn-node (api/list-node
                   (cond-> (list (api/token-node 'fn))
-                    production-docs (concat [production-docs])
                     :always (concat [input-args])
                     production-opts (concat [production-opts])
                     :always (concat [production-result])))
         new-node (vary-meta
                    (api/list-node
-                     (list
-                       (api/token-node 'def) production-name
-                       (api/map-node
-                         [(api/keyword-node :production) fn-node])))
+                     (cond-> (list (api/token-node 'def) production-name)
+                       production-docs (concat [production-docs])
+                       :always (concat [(api/map-node
+                                          [(api/keyword-node :production) fn-node])])))
                    merge {:clj-kondo/ignore [:clojure-lsp/unused-public-var]})]
     {:node new-node}))
 
@@ -385,16 +384,15 @@
                               body-seq))
         fn-node (api/list-node
                   (cond-> (list (api/token-node 'fn))
-                    production-docs (concat [production-docs])
                     :always (concat [input-args])
                     production-opts (concat [production-opts])
                     :always (concat [production-result])))
         new-node (vary-meta
                    (api/list-node
-                     (list
-                       (api/token-node 'def) production-name
-                       (api/map-node
-                         [(api/keyword-node :production) fn-node])))
+                     (cond-> (list (api/token-node 'def) production-name)
+                       production-docs (concat [production-docs])
+                       :always (concat [(api/map-node
+                                          [(api/keyword-node :production) fn-node])])))
                    merge {:clj-kondo/ignore [:clojure-lsp/unused-public-var]})]
     {:node new-node}))
 
