@@ -110,6 +110,11 @@
                  `(.remove ~tl)))))))
 
 (defmacro eager-for
-  "A for wrapped with a doall to force realisation. Usage is the same as regular for."
-  [& body]
-  `(doall (for ~@body)))
+  "An eager version of for that returns a persistent vector.
+   Uses doseq+transient internally to avoid lazy seq allocation.
+   Supports all doseq binding forms (:let, :when, :while, multiple seqs)."
+  [bindings body]
+  `(let [res# (volatile! (transient []))]
+     (doseq ~bindings
+       (vswap! res# conj! ~body))
+     (persistent! @res#)))
