@@ -631,23 +631,200 @@
                 (l/alpha-retract! listener (:node entry) (mapv :fact elements)))
               (retract-elements transport memory listener (:children entry) elements))))))))
 
+;; A discrimination-tree alpha node that uses hash-based lookup on a single
+;; equality constraint field to skip non-matching entries. Falls back to
+;; evaluating default entries (those without the discriminated constraint).
+(defrecord DiscriminationNode [id accessor-kw dispatch-map default-indices entries fact-type]
+  ;; accessor-kw: keyword like :temperature, used as (accessor-kw fact) to extract field value
+  ;; dispatch-map: {constant-value -> int-array of entry indices}
+  ;; default-indices: int-array of indices for entries WITHOUT the discriminated constraint
+  ;; entries: vector of {:id :env :children :activation :node} (same as FusedAlphaNode)
+  IAlphaActivate
+  (alpha-activate [this facts memory transport listener]
+    (let [n (count entries)
+          slots (object-array n)]
+      (doseq [fact facts]
+        (let [field-val (accessor-kw fact)
+              matched (get dispatch-map field-val)]
+          ;; Evaluate matched indices (entries with this field value)
+          (when matched
+            (let [len (alength ^ints matched)]
+              (dotimes [j len]
+                (let [i (aget ^ints matched j)
+                      entry (nth entries i)
+                      bindings (try ((:activation entry) fact (:env entry))
+                                    (catch #?(:clj Exception :cljs :default) e
+                                      (throw-condition-exception {:cause e
+                                                                  :node (:node entry)
+                                                                  :fact fact
+                                                                  :env (:env entry)})))]
+                  (when bindings
+                    (let [element (->Element fact bindings)
+                          existing (aget slots i)]
+                      (aset slots i (if existing
+                                      (conj existing element)
+                                      [element]))))))))
+          ;; Evaluate default indices (entries without the discriminated constraint)
+          (let [dlen (alength ^ints default-indices)]
+            (dotimes [j dlen]
+              (let [i (aget ^ints default-indices j)
+                    entry (nth entries i)
+                    bindings (try ((:activation entry) fact (:env entry))
+                                  (catch #?(:clj Exception :cljs :default) e
+                                    (throw-condition-exception {:cause e
+                                                                :node (:node entry)
+                                                                :fact fact
+                                                                :env (:env entry)})))]
+                (when bindings
+                  (let [element (->Element fact bindings)
+                        existing (aget slots i)]
+                    (aset slots i (if existing
+                                    (conj existing element)
+                                    [element])))))))))
+      ;; Dispatch accumulated elements per entry
+      (let [null-listener (l/null-listener? listener)]
+        (dotimes [i n]
+          (when-let [elements (aget slots i)]
+            (let [entry (nth entries i)]
+              (when-not null-listener
+                (l/alpha-activate! listener (:node entry) (mapv :fact elements)))
+              (send-elements transport memory listener (:children entry) elements)))))))
+
+  (alpha-retract [this facts memory transport listener]
+    (let [n (count entries)
+          slots (object-array n)]
+      (doseq [fact facts]
+        (let [field-val (accessor-kw fact)
+              matched (get dispatch-map field-val)]
+          (when matched
+            (let [len (alength ^ints matched)]
+              (dotimes [j len]
+                (let [i (aget ^ints matched j)
+                      entry (nth entries i)
+                      bindings (try ((:activation entry) fact (:env entry))
+                                    (catch #?(:clj Exception :cljs :default) e
+                                      (throw-condition-exception {:cause e
+                                                                  :node (:node entry)
+                                                                  :fact fact
+                                                                  :env (:env entry)})))]
+                  (when bindings
+                    (let [element (->Element fact bindings)
+                          existing (aget slots i)]
+                      (aset slots i (if existing
+                                      (conj existing element)
+                                      [element]))))))))
+          (let [dlen (alength ^ints default-indices)]
+            (dotimes [j dlen]
+              (let [i (aget ^ints default-indices j)
+                    entry (nth entries i)
+                    bindings (try ((:activation entry) fact (:env entry))
+                                  (catch #?(:clj Exception :cljs :default) e
+                                    (throw-condition-exception {:cause e
+                                                                :node (:node entry)
+                                                                :fact fact
+                                                                :env (:env entry)})))]
+                (when bindings
+                  (let [element (->Element fact bindings)
+                        existing (aget slots i)]
+                    (aset slots i (if existing
+                                    (conj existing element)
+                                    [element])))))))))
+      (let [null-listener (l/null-listener? listener)]
+        (dotimes [i n]
+          (when-let [elements (aget slots i)]
+            (let [entry (nth entries i)]
+              (when-not null-listener
+                (l/alpha-retract! listener (:node entry) (mapv :fact elements)))
+              (retract-elements transport memory listener (:children entry) elements))))))))
+
+(defn- best-discriminating-field
+  "Given a sequence of [entry-index discriminators] pairs, selects the best field
+   to discriminate on. Returns {:field kw :coverage n :entries [{:index :value}]}
+   or nil if no field covers 2+ entries."
+  [indexed-discriminators]
+  (let [;; Build {field -> [{:index entry-index :value constant-value}]}
+        field-groups (reduce
+                      (fn [m [entry-idx discs]]
+                        (reduce (fn [m {:keys [field value]}]
+                                  (update m field (fnil conj []) {:index entry-idx :value value}))
+                                m discs))
+                      {}
+                      indexed-discriminators)]
+    (when (seq field-groups)
+      (let [best (reduce-kv
+                  (fn [best field entries]
+                    (let [coverage (count entries)]
+                      (if (and (>= coverage 2)
+                               (or (nil? best)
+                                   (> coverage (:coverage best))
+                                   ;; Tiebreak: more distinct values = better hash spread
+                                   (and (= coverage (:coverage best))
+                                        (> (count (distinct (map :value entries)))
+                                           (count (distinct (map :value (:entries best))))))))
+                        {:field field :coverage coverage :entries entries}
+                        best)))
+                  nil
+                  field-groups)]
+        best))))
+
 (defn fuse-alpha-nodes
   "Given a vector of AlphaNodes for the same fact-type, returns a single
-   FusedAlphaNode wrapping them when there are 2+ nodes. For single-node
-   vectors (or empty), returns the nodes as-is."
+   FusedAlphaNode or DiscriminationNode wrapping them when there are 2+ nodes.
+   For single-node vectors (or empty), returns the nodes as-is.
+   When discrimination metadata is available on 2+ nodes, builds a
+   DiscriminationNode that uses hash-based lookup to skip non-matching entries."
   [create-id-fn alpha-nodes]
   (if (< (count alpha-nodes) 2)
     alpha-nodes
-    [(->FusedAlphaNode
-      (create-id-fn)
-      (mapv (fn [node]
-              {:id (:id node)
-               :env (:env node)
-               :children (:children node)
-               :activation (:activation node)
-               :node node})
-            alpha-nodes)
-      (:fact-type (first alpha-nodes)))]))
+    (let [entries (mapv (fn [node]
+                          {:id (:id node)
+                           :env (:env node)
+                           :children (:children node)
+                           :activation (:activation node)
+                           :node node})
+                        alpha-nodes)
+          ;; Collect discriminator metadata from AlphaNode records
+          indexed-discs (into []
+                              (keep-indexed
+                               (fn [idx node]
+                                 (when-let [discs (:clara.rules.compiler/discriminators (meta node))]
+                                   [idx discs])))
+                              alpha-nodes)]
+      (if (>= (count indexed-discs) 2)
+        ;; Try to build a discrimination node
+        (if-let [{:keys [field coverage entries-info]}
+                 (when-let [best (best-discriminating-field indexed-discs)]
+                   {:field (:field best)
+                    :coverage (:coverage best)
+                    :entries-info (:entries best)})]
+          (let [;; Set of entry indices that have the discriminated constraint
+                discriminated-indices (into #{} (map :index) entries-info)
+                ;; Build dispatch-map: {value -> int-array of entry indices}
+                dispatch-map (reduce
+                              (fn [m {:keys [index value]}]
+                                (update m value (fnil conj []) index))
+                              {}
+                              entries-info)
+                dispatch-map (into {}
+                                   (map (fn [[v indices]]
+                                          [v (int-array indices)]))
+                                   dispatch-map)
+                ;; Default indices: entries without the discriminated constraint
+                default-indices (int-array
+                                 (into []
+                                       (remove discriminated-indices)
+                                       (range (count entries))))]
+            [(->DiscriminationNode
+              (create-id-fn)
+              field
+              dispatch-map
+              default-indices
+              entries
+              (:fact-type (first alpha-nodes)))])
+          ;; No good discriminating field found, fall back to FusedAlphaNode
+          [(->FusedAlphaNode (create-id-fn) entries (:fact-type (first alpha-nodes)))])
+        ;; Not enough discriminators, fall back to FusedAlphaNode
+        [(->FusedAlphaNode (create-id-fn) entries (:fact-type (first alpha-nodes)))]))))
 
 (defrecord RootJoinNode [id condition children binding-keys]
   ILeftActivate

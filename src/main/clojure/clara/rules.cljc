@@ -218,9 +218,12 @@
                                   [(:id node) node]))
 
             ;; type, alpha node tuples.
-            alpha-nodes (for [{:keys [id type alpha-fn children env]} alpha-fns
-                              :let [beta-children (map id-to-node children)]]
-                          [type (eng/->AlphaNode id env beta-children alpha-fn type)])
+            alpha-nodes (for [{:keys [id type alpha-fn children env discriminators]} alpha-fns
+                              :let [beta-children (map id-to-node children)
+                                    node (eng/->AlphaNode id env beta-children alpha-fn type)]]
+                          [type (if discriminators
+                                  (vary-meta node assoc :clara.rules.compiler/discriminators discriminators)
+                                  node)])
 
             ;; Merge the alpha nodes into a multi-map
             alpha-map (reduce

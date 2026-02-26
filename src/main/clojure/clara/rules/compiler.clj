@@ -218,6 +218,52 @@
     (boolean (or (#{'= '== 'clojure.core/= 'clojure.core/==} op)
                  (#{'clojure.core/= 'clojure.core/==} (qualify-when-sym op))))))
 
+(defn- literal-value?
+  "Returns true if x is a compile-time constant suitable for discrimination:
+   keywords, strings, numbers, booleans, or nil."
+  [x]
+  (or (keyword? x)
+      (string? x)
+      (number? x)
+      (true? x)
+      (false? x)
+      (nil? x)))
+
+(defn extract-equality-discriminators
+  "Given a fact type and constraints (vector of s-expressions), returns a vector
+   of {:field field-keyword, :value constant-value} for binary equality constraints
+   of the form (= field constant) where field is a known field accessor and constant
+   is a compile-time literal. Returns nil if no discriminators are found."
+  [type constraints]
+  (let [fields (get-fields type)
+        field-names (into #{} (map first) fields)]
+    (when (seq field-names)
+      (let [discs (into []
+                        (comp
+                         ;; Only binary equality expressions
+                         (filter #(and (equality-expression? %)
+                                       (= 3 (count %))))
+                         (map (fn [[_op a b]]
+                                ;; Try both (= field constant) and (= constant field)
+                                (cond
+                                  (and (field-names a)
+                                       (not (and (symbol? a) (= \? (first (name a)))))
+                                       (literal-value? b)
+                                       (not (and (symbol? b) (= \? (first (name b))))))
+                                  {:field (keyword a) :value b}
+
+                                  (and (field-names b)
+                                       (not (and (symbol? b) (= \? (first (name b)))))
+                                       (literal-value? a)
+                                       (not (and (symbol? a) (= \? (first (name a))))))
+                                  {:field (keyword b) :value a}
+
+                                  :else nil)))
+                         (filter some?))
+                        constraints)]
+        (when (seq discs)
+          discs)))))
+
 (def ^:dynamic *compile-ctx* nil)
 
 (defn try-eval
@@ -1765,15 +1811,22 @@
                                   :type sc/Any
                                   :alpha-fn sc/Any ;; TODO: is a function...
                                   (sc/optional-key :env) {sc/Keyword sc/Any}
+                                  (sc/optional-key :discriminators) sc/Any
                                   :children [sc/Num]}]
   [alpha-nodes :- [schema/AlphaNode]
    expr-fn-lookup :- schema/NodeFnLookup]
-  (for [{:keys [id condition beta-children env] :as node} alpha-nodes]
+  (for [{:keys [id condition beta-children env] :as node} alpha-nodes
+        :let [{:keys [type constraints args]} condition]]
     (cond-> {:id id
-             :type (effective-type (:type condition))
+             :type (effective-type type)
              :alpha-fn (first (safe-get expr-fn-lookup [id :alpha-expr]))
              :children beta-children}
-            env (assoc :env env))))
+            env (assoc :env env)
+            ;; Add discriminators when condition has no destructured args
+            (not (first args))
+            (as-> m (if-let [discs (extract-equality-discriminators type constraints)]
+                      (assoc m :discriminators (vec discs))
+                      m)))))
 
 ;; Wrap the fact-type so that Clojure equality and hashcode semantics are used
 ;; even though this is placed in a Java map.
@@ -1908,9 +1961,12 @@
                              entry))
 
         ;; type, alpha node tuples.
-        alpha-nodes (for [{:keys [id type alpha-fn children env] :as alpha-map} alpha-fns
-                          :let [beta-children (map id-to-node children)]]
-                      [type (eng/->AlphaNode id env beta-children alpha-fn type)])
+        alpha-nodes (for [{:keys [id type alpha-fn children env discriminators] :as alpha-map} alpha-fns
+                          :let [beta-children (map id-to-node children)
+                                node (eng/->AlphaNode id env beta-children alpha-fn type)]]
+                      [type (if discriminators
+                              (vary-meta node assoc ::discriminators discriminators)
+                              node)])
 
         ;; Merge the alpha nodes into a multi-map
         alpha-map (reduce

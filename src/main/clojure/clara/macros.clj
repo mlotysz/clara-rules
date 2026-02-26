@@ -208,10 +208,15 @@
    (for [{:keys [id condition beta-children env]} alpha-nodes
          :let [{:keys [type constraints fact-binding args]} condition]]
 
-     {:id id
-      :type (com/effective-type type)
-      :alpha-fn (com/compile-condition type id (first args) constraints fact-binding env)
-      :children (vec beta-children)})))
+     (cond-> {:id id
+              :type (com/effective-type type)
+              :alpha-fn (com/compile-condition type id (first args) constraints fact-binding env)
+              :children (vec beta-children)}
+             ;; Add discriminators when condition has no destructured args
+             (not (first args))
+             (as-> m (if-let [discs (com/extract-equality-discriminators type constraints)]
+                       (assoc m :discriminators (vec discs))
+                       m))))))
 
 (defn productions->session-assembly-form
   [productions options]
