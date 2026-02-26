@@ -446,6 +446,31 @@ The original implementation used an `atom` with persistent vectors, incurring co
 
 This follows the precedent set by `CancellingUpdateCache`, which already used mutable Java collections.
 
+=== 2.5 — FusedAlphaNode for Batched Alpha Dispatch
+
+**File:** `compiler.clj`, `engine.cljc` | **Impact:** Reduced per-fact dispatch overhead for multi-node types
+
+When a fact type has N alpha nodes, replace N independent `alpha-activate` dispatches with a single `FusedAlphaNode` that evaluates all activations in one per-fact-then-per-node pass, accumulates elements per original node, then batch-dispatches to beta children.
+Fusion is applied at `get-alphas-fn` construction time (not in `alpha-roots`) to preserve durability serialization compatibility.
+Single-node types are unchanged.
+
+=== 2.6 — Allocation Reduction in Engine Hot Paths
+
+**Files:** `engine.cljc`, `memory.cljc`, `platform.cljc`, `listener.cljc` | **Impact:** Significant reduction in per-activation and per-join allocation
+
+Multiple targeted changes to reduce allocation pressure across the engine:
+
+* **`eager-for` → `doseq` + transient:** Replace the `eager-for` macro with `doseq` + transient vector construction at ~26 call sites, eliminating lazy seq allocation
+* **Atoms → volatiles:** Replace `atom` with `volatile!` in single-threaded `fire-rules*` paths (per-activation state, update tracking)
+* **`RuleContext` defrecord:** Replace per-activation `{:node ... :token ...}` map allocation with a typed defrecord
+* **Dynamic binding elimination:** Replace `*rule-context*` dynamic binding with a volatile field on `*current-session*`, eliminating `pushThreadBindings`/`popThreadBindings` per activation
+* **`MapEntry` for match pairs:** Use `MapEntry` instead of `PersistentVector` for `[fact node-id]` pairs (~32 bytes vs ~96 bytes on JVM)
+* **`flush-updates` optimization:** Eagerly group consecutive same-type updates into `[type facts]` pairs instead of lazy `partition-by` + `mapcat`
+* **`select-keys` specialization:** Specialize 1-key and 2-key cases in `propagate-items-to-nodes` using map literals instead of generic `select-keys`
+* **Memory path optimization:** Replace `get-in`/`assoc-in` with nested `get`/`assoc` in accumulator memory paths to eliminate key-path vector allocation
+* **Eager sequence variants:** Replace lazy seqs with eager variants in `filter-accum-facts`, `pre-reduce`, `matches-some-facts?`, and `DelegatingListener` transitions
+* **Join binding order fix:** Fix `conj` argument order in `HashJoinNode`/`ExpressionJoinNode` to iterate the smaller fact-bindings map
+
 == Proposed Optimizations (Phase 2-3)
 
 The following optimizations have been identified but not yet implemented.
@@ -607,6 +632,16 @@ Delta propagation would instead compute the _difference_ between old and new sta
 |2.3
 |OrderedUpdateCache mutable collections
 |`update_cache/core.cljc`
+|✓ Done
+
+|2.5
+|FusedAlphaNode batched alpha dispatch
+|`compiler.clj`, `engine.cljc`
+|✓ Done
+
+|2.6
+|Allocation reduction in engine hot paths
+|`engine.cljc`, `memory.cljc`, `platform.cljc`
 |✓ Done
 
 |2.2
