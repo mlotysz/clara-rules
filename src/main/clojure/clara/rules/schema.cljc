@@ -115,7 +115,10 @@
    (s/optional-key :accumulator) s/Any
 
    ;; The optional fact or accumulator result binding.
-   (s/optional-key :result-binding) s/Keyword})
+   (s/optional-key :result-binding) s/Keyword
+
+   ;; Indexable top-level equalities extracted from join-filter-expressions for sub-indexing.
+   (s/optional-key :sub-index-equalities) s/Any})
 
 (def ProductionNode
   {:node-type (s/enum :production :query)
@@ -170,7 +173,8 @@
 (def NodeCompilationValue
   (s/constrained {s/Keyword s/Any}
                  (fn [compilation]
-                   (let [expr-keys #{:alpha-expr :action-expr :join-filter-expr :test-expr :accum-expr}]
+                   (let [expr-keys #{:alpha-expr :action-expr :join-filter-expr :test-expr :accum-expr
+                                     :sub-index-token-key-expr :sub-index-element-key-expr}]
                      (some expr-keys (keys compilation))))
                  "node-compilation-value"))
 

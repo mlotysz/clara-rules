@@ -91,18 +91,29 @@
       (case (:node-type beta-node)
 
         :join
-        (if (:join-filter-expressions beta-node)
-          `(eng/->ExpressionJoinNode
-            ~id
-            '~condition
-            ~(com/compile-join-filter id
-                                      "ExpressionJoinNode"
-                                      (:join-filter-expressions beta-node)
-                                      (:join-filter-join-bindings beta-node)
-                                      (:new-bindings beta-node)
-                                      {})
-            ~(gen-beta-network child-ids beta-graph all-bindings)
-            ~join-bindings)
+        (if (or (:join-filter-expressions beta-node)
+                (:sub-index-equalities beta-node))
+          (let [sub-idx (:sub-index-equalities beta-node)]
+            `(eng/->ExpressionJoinNode
+              ~id
+              '~condition
+              ~(when (:join-filter-expressions beta-node)
+                 (com/compile-join-filter id
+                                         "ExpressionJoinNode"
+                                         (:join-filter-expressions beta-node)
+                                         (:join-filter-join-bindings beta-node)
+                                         (:new-bindings beta-node)
+                                         {}))
+              ~(gen-beta-network child-ids beta-graph all-bindings)
+              ~join-bindings
+              ~(when sub-idx
+                 (#'com/compile-sub-index-element-key-fn
+                   id condition (mapv :fact-expr sub-idx)
+                   (:new-bindings beta-node)))
+              ~(when sub-idx
+                 (#'com/compile-sub-index-token-key-fn
+                   id (mapv :token-expr sub-idx)
+                   (:join-filter-join-bindings beta-node)))))
           `(eng/->HashJoinNode
             ~id
             '~condition

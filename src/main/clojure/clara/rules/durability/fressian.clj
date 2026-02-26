@@ -423,8 +423,10 @@
    (create-cached-node-handler ExpressionJoinNode
                                "clara/exprjoinnode"
                                "clara/exprjoinnodeid"
-                               #(assoc % :join-filter-fn nil)
-                               d/add-join-filter-fn)
+                               #(assoc % :join-filter-fn nil
+                                         :element-key-fn nil
+                                         :token-key-fn nil)
+                               (comp d/add-sub-index-fns d/add-join-filter-fn))
 
    "clara/negationnode"
    (create-cached-node-handler NegationNode

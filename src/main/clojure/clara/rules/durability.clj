@@ -55,6 +55,11 @@
 (defn add-test-fn [node]
   (add-node-fn node :test :test-expr))
 
+(defn add-sub-index-fns [node]
+  (-> node
+      (add-node-fn :element-key-fn :sub-index-element-key-expr)
+      (add-node-fn :token-key-fn :sub-index-token-key-expr)))
+
 (defn add-accumulator [node]
   (assoc node
          :accumulator ((first (get (.get node-fn-cache) [(:id node) :accum-expr]))

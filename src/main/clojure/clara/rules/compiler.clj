@@ -945,6 +945,99 @@
                 :when (non-equality-unification? constraint bound-variables)]
             constraint))))
 
+(defn- extract-indexable-join-equalities
+  "Among the constraints destined for join-filter-expressions, identifies
+   top-level equalities (= token-expr fact-expr) where:
+   - top-level op is = or ==
+   - one operand depends only on parent-binding ?-vars (token side)
+   - other operand has no parent-binding ?-vars (fact side)
+   - no NEW ?-variables are introduced (all ?-vars already in parent-bindings)
+   Returns {:indexable [...] :remaining [...]}."
+  [constraints parent-bindings]
+  (let [parent-binding-syms (into #{} (map (comp symbol name)) parent-bindings)
+        classify (fn [constraint]
+                   (if (and (seq? constraint)
+                            (equality-expression? constraint)
+                            ;; Exactly 2 operands (= a b)
+                            (= 3 (count constraint)))
+                     (let [[_ expr-a expr-b] constraint
+                           all-vars (into #{} (filter is-variable?) (flatten-expression constraint))
+                           ;; All ?-vars must be already bound in parent
+                           new-vars (remove parent-binding-syms all-vars)]
+                       (if (seq new-vars)
+                         ;; Has new variables — not indexable
+                         :remaining
+                         (let [vars-in-a (into #{} (filter is-variable?) (flatten-expression expr-a))
+                               vars-in-b (into #{} (filter is-variable?) (flatten-expression expr-b))
+                               parent-vars-a (set/intersection vars-in-a parent-binding-syms)
+                               parent-vars-b (set/intersection vars-in-b parent-binding-syms)]
+                           (cond
+                             ;; expr-a is token-side, expr-b is fact-side
+                             (and (seq parent-vars-a) (empty? parent-vars-b))
+                             :indexable-ab
+
+                             ;; expr-b is token-side, expr-a is fact-side
+                             (and (seq parent-vars-b) (empty? parent-vars-a))
+                             :indexable-ba
+
+                             ;; Both sides have parent vars or neither — not indexable
+                             :else :remaining))))
+                     :remaining))
+        classified (mapv (fn [c] [(classify c) c]) constraints)
+        indexable (into []
+                        (keep (fn [[tag c]]
+                                (case tag
+                                  :indexable-ab {:token-expr (nth c 1) :fact-expr (nth c 2) :constraint c}
+                                  :indexable-ba {:token-expr (nth c 2) :fact-expr (nth c 1) :constraint c}
+                                  nil)))
+                        classified)
+        remaining (into [] (keep (fn [[tag c]] (when (= :remaining tag) c))) classified)]
+    {:indexable indexable
+     :remaining remaining}))
+
+(defn- compile-sub-index-token-key-fn
+  "Compiles a function (fn [token] key-value) that extracts the sub-index key
+   from the token's bindings. token-exprs are the token-side expressions from
+   indexable equalities."
+  [node-id token-exprs ancestor-bindings]
+  (let [token-binding-keys (into #{}
+                                 (comp (mapcat flatten-expression)
+                                       (filter is-variable?)
+                                       (map keyword))
+                                 token-exprs)
+        fn-name (mk-node-fn-name "ExpressionJoinNode" node-id "TKF")
+        key-forms (mapv (fn [expr] expr) token-exprs)
+        key-form (if (= 1 (count key-forms))
+                   (first key-forms)
+                   (into [] key-forms))]
+    `(fn ~fn-name [~'?__token__]
+       (let [{:keys [~@(map (comp symbol name) token-binding-keys)]} (:bindings ~'?__token__)]
+         ~key-form))))
+
+(defn- compile-sub-index-element-key-fn
+  "Compiles a function (fn [fact fact-bindings] key-value) that extracts the
+   sub-index key from the fact and its element bindings. fact-exprs are the
+   fact-side expressions from indexable equalities."
+  [node-id {:keys [type constraints args] :as condition} fact-exprs element-bindings]
+  (let [accessors (field-name->accessors-used type (concat constraints fact-exprs))
+        destructured-fact (first args)
+        fact-assignments (if destructured-fact
+                           [destructured-fact '?__fact__]
+                           (concat '(this ?__fact__)
+                                   (mapcat (fn [[name accessor]]
+                                             [name (list accessor '?__fact__)])
+                                           accessors)))
+        fn-name (mk-node-fn-name "ExpressionJoinNode" node-id "EKF")
+        key-forms (mapv (fn [expr] expr) fact-exprs)
+        key-form (if (= 1 (count key-forms))
+                   (first key-forms)
+                   (into [] key-forms))]
+    `(fn ~fn-name [~(add-meta '?__fact__ type) ~'?__element-bindings__]
+       (let [~@fact-assignments
+             ~@(if (seq element-bindings)
+                 [{:keys (mapv (comp symbol name) element-bindings)} '?__element-bindings__])]
+         ~key-form))))
+
 (sc/defn condition-to-node :- schema/ConditionNode
   "Converts a condition to a node structure."
   [condition :- schema/Condition
@@ -982,6 +1075,24 @@
                                     (assoc condition :constraints (filterv non-equality-unifications (:constraints condition)))
 
                                     nil)
+
+        ;; For join nodes, extract indexable top-level equalities from the join-filter constraints.
+        ;; These can be used for sub-indexing at runtime to avoid the full cross-product.
+        {:keys [sub-index-equalities join-filter-expressions]}
+        (if (and (= :join node-type)
+                 join-filter-expressions)
+          (let [{:keys [indexable remaining]} (extract-indexable-join-equalities
+                                               (:constraints join-filter-expressions)
+                                               parent-bindings)]
+            (if (seq indexable)
+              {:sub-index-equalities indexable
+               :join-filter-expressions (if (seq remaining)
+                                          (assoc join-filter-expressions :constraints remaining)
+                                          nil)}
+              {:sub-index-equalities nil
+               :join-filter-expressions join-filter-expressions}))
+          {:sub-index-equalities nil
+           :join-filter-expressions join-filter-expressions})
 
         ;; Remove instances of non-equality constraints from accumulator
         ;; and negation nodes, since those are handled with specialized node implementations.
@@ -1024,7 +1135,9 @@
 
           join-filter-expressions (assoc :join-filter-expressions join-filter-expressions)
 
-          join-filter-bindings (assoc :join-filter-join-bindings (set/intersection join-filter-bindings parent-bindings)))))
+          join-filter-bindings (assoc :join-filter-join-bindings (set/intersection join-filter-bindings parent-bindings))
+
+          sub-index-equalities (assoc :sub-index-equalities sub-index-equalities))))
 
 (sc/defn ^:private add-node :- schema/BetaGraph
   "Adds a node to the beta graph."
@@ -1450,24 +1563,47 @@
                     beta-node)
             ::root-condition prev
 
-            :join (if (or (root-node? backward-edges id)
-                          (not (:join-filter-expressions beta-node)))
-                    ;; This is either a RootJoin or HashJoin node, in either case they do not have an expression
-                    ;; to capture.
+            :join (if (root-node? backward-edges id)
+                    ;; Root join node, no expressions to capture.
                     prev
-                    (handle-expr prev
-                                 (compile-join-filter id
-                                                      "ExpressionJoinNode"
-                                                      (:join-filter-expressions beta-node)
-                                                      (:join-filter-join-bindings beta-node)
-                                                      (:new-bindings beta-node)
-                                                      (:env beta-node))
-                                 id
-                                 :join-filter-expr
-                                 {:compile-ctx {:condition condition
-                                                :join-filter-expressions (:join-filter-expressions beta-node)
-                                                :env (:env beta-node)
-                                                :msg "compiling expression join node"}}))
+                    (let [has-join-filter (:join-filter-expressions beta-node)
+                          has-sub-index (:sub-index-equalities beta-node)
+                          prev (if has-join-filter
+                                 (handle-expr prev
+                                              (compile-join-filter id
+                                                                   "ExpressionJoinNode"
+                                                                   (:join-filter-expressions beta-node)
+                                                                   (:join-filter-join-bindings beta-node)
+                                                                   (:new-bindings beta-node)
+                                                                   (:env beta-node))
+                                              id
+                                              :join-filter-expr
+                                              {:compile-ctx {:condition condition
+                                                             :join-filter-expressions (:join-filter-expressions beta-node)
+                                                             :env (:env beta-node)
+                                                             :msg "compiling expression join node"}})
+                                 prev)]
+                      (if has-sub-index
+                        (let [token-exprs (mapv :token-expr has-sub-index)
+                              fact-exprs (mapv :fact-expr has-sub-index)
+                              prev (handle-expr prev
+                                                (compile-sub-index-token-key-fn
+                                                  id token-exprs
+                                                  (:join-filter-join-bindings beta-node))
+                                                id
+                                                :sub-index-token-key-expr
+                                                {:compile-ctx {:condition condition
+                                                               :msg "compiling sub-index token key fn"}})
+                              prev (handle-expr prev
+                                                (compile-sub-index-element-key-fn
+                                                  id condition fact-exprs
+                                                  (:new-bindings beta-node))
+                                                id
+                                                :sub-index-element-key-expr
+                                                {:compile-ctx {:condition condition
+                                                               :msg "compiling sub-index element key fn"}})]
+                          prev)
+                        prev)))
             :negation (if (:join-filter-expressions beta-node)
                         (handle-expr prev
                                      (compile-join-filter id
@@ -1616,13 +1752,19 @@
 
         ;; If the join operation includes arbitrary expressions
         ;; that can't expressed as a hash join, we must use the expressions
-        (if (:join-filter-expressions beta-node)
+        (if (or (:join-filter-expressions beta-node)
+                (:sub-index-equalities beta-node))
           (eng/->ExpressionJoinNode
             id
             condition
-            (compiled-expr-fn id :join-filter-expr)
+            (when (:join-filter-expressions beta-node)
+              (compiled-expr-fn id :join-filter-expr))
             children
-            join-bindings)
+            join-bindings
+            (when (:sub-index-equalities beta-node)
+              (compiled-expr-fn id :sub-index-element-key-expr))
+            (when (:sub-index-equalities beta-node)
+              (compiled-expr-fn id :sub-index-token-key-expr)))
           (eng/->HashJoinNode
             id
             condition

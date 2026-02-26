@@ -10,13 +10,15 @@
                                     insert!
                                     query]]
 
-               [clara.rules.testfacts :refer [->Cold ->ColdAndWindy]]
+               [clara.rules.testfacts :refer [->Cold ->ColdAndWindy ->Temperature ->WindSpeed]]
                [clojure.test :refer [is deftest run-tests testing use-fixtures]]
                [clara.rules.accumulators]
                [schema.test :as st])
      (:import [clara.rules.testfacts
                Cold
-               ColdAndWindy]))
+               ColdAndWindy
+               Temperature
+               WindSpeed]))
 
    :cljs
    (ns clara.test-performance-optimizations
@@ -25,7 +27,9 @@
                                     insert!
                                     query]]
                [clara.rules.testfacts :refer [->Cold Cold
-                                              ->ColdAndWindy ColdAndWindy]]
+                                              ->ColdAndWindy ColdAndWindy
+                                              ->Temperature Temperature
+                                              ->WindSpeed WindSpeed]]
                [clara.rules.accumulators]
                [cljs.test]
                [schema.test :as st]
@@ -60,3 +64,30 @@
              (insert (->ColdAndWindy 0 0))
              fire-rules
              (query cold-query)))))
+
+;; Test that sub-indexing for ExpressionJoinNode works correctly.
+;; The pattern (= (:location ?t) location) uses a computed expression on a parent-bound
+;; variable (?t), which triggers a non-equality unification and thus an ExpressionJoinNode.
+;; With sub-indexing, the equality is extracted as an index key to avoid the full cross-product.
+(def-rules-test test-expression-join-sub-indexing
+
+  {:queries [temp-wind-query [[]
+                              [[Temperature (= ?t this)]
+                               [WindSpeed (= (:location ?t) location)
+                                          (= ?w windspeed)]]]]
+
+   :sessions [empty-session [temp-wind-query] {}]}
+
+  (let [results (-> empty-session
+                    (insert (->Temperature 10 "MCI")
+                            (->Temperature 20 "LAX")
+                            (->WindSpeed 30 "MCI")
+                            (->WindSpeed 40 "LAX")
+                            (->WindSpeed 50 "ORD"))
+                    fire-rules
+                    (query temp-wind-query))]
+    ;; Should match MCI temp with MCI wind, and LAX temp with LAX wind.
+    ;; ORD wind should not match any temperature.
+    (is (= 2 (count results)))
+    (is (= #{[10 30] [20 40]}
+           (into #{} (map (juxt (comp :temperature :?t) :?w) results))))))

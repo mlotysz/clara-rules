@@ -16,3 +16,4 @@ Fork-specific changes (based on upstream 0.24.0):
 * Fix clj-kondo errors for `defrule`/`defquery` docstrings in hooks
 * Remove Oracle-specific files (CONTRIBUTING.md, SECURITY.md, RELEASE.md)
 * Convert README to AsciiDoc
+* Add beta sub-indexing for ExpressionJoinNode to reduce join cross-product from O(T×E) to O(T+E)
