@@ -1,7 +1,6 @@
 (ns clara.rules.accumulators
   "A set of common accumulators usable in Clara rules."
   (:require [clara.rules.engine :as eng]
-            [clojure.set :as set]
             [schema.core :as s])
   (:refer-clojure :exclude [min max distinct count]))
 
@@ -20,7 +19,7 @@
    * An optional convert-return-fn that converts the reduced data into something useful to the caller.
      Simply uses identity by default.
     "
-  [{:keys [initial-value reduce-fn combine-fn retract-fn convert-return-fn] :as accum-map}]
+  [{:as accum-map}]
 
   ;; Validate expected arguments are present.
   (s/validate {(s/optional-key :initial-value) s/Any
@@ -177,8 +176,8 @@
   []
   (accum
    {:initial-value 0
-    :reduce-fn (fn [count value] (inc count))
-    :retract-fn (fn [count retracted] (dec count))
+    :reduce-fn (fn [count _value] (inc count))
+    :retract-fn (fn [count _retracted] (dec count))
     :combine-fn +}))
 
 (defn exists

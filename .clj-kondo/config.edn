@@ -1,1 +1,4 @@
-{:config-paths ["../clj-kondo/clj-kondo.exports/clara/rules"]}
+{:config-paths ["../clj-kondo/clj-kondo.exports/clara/rules"]
+ ;; Prismatic Schema's s/defn uses [args] :- ReturnType syntax (after the arg vector),
+ ;; which clj-kondo incorrectly flags as misplaced. Disable this false positive.
+ :linters {:schema-misplaced-return {:level :off}}}

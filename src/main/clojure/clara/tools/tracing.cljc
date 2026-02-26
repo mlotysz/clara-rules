@@ -29,7 +29,7 @@
   (insert-facts! [listener node token facts]
     (append-trace listener {:type :add-facts :node node :token token :facts facts}))
   
-  (alpha-activate! [listener node facts]
+  (alpha-activate! [listener _node facts]
     (append-trace listener {:type :alpha-activate :facts facts}))
 
   (insert-facts-logical! [listener node token facts]
@@ -38,7 +38,7 @@
   (retract-facts! [listener node token facts]
     (append-trace listener {:type :retract-facts :node node :token token :facts facts}))
   
-  (alpha-retract! [listener node facts]
+  (alpha-retract! [listener _node facts]
     (append-trace listener {:type :alpha-retract :facts facts}))
 
   (retract-facts-logical! [listener node token facts]
@@ -72,7 +72,7 @@
   (activation-group-transition! [listener previous-group new-group]
     (append-trace listener {:type :activation-group-transition :new-group new-group :previous-group previous-group}))
 
-  (to-persistent! [listener]
+  (to-persistent! [_listener]
     (PersistentTracingListener. @trace)))
 
 (defn- to-tracing-listener [^PersistentTracingListener listener]

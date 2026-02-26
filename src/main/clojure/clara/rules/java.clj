@@ -3,11 +3,9 @@
   Java support. Users should use the Java API, or the clara.rules namespace from Clojure."
   (:require [clara.rules :as clara]
             [clara.rules.engine :as eng]
-            [clara.rules.compiler :as com]
-            [clara.rules.memory :as mem])
+            [clara.rules.compiler :as com])
   (:refer-clojure :exclude [==])
-  (:import [clara.rules.engine LocalTransport]
-           [clara.rules WorkingMemory QueryResult]))
+  (:import [clara.rules WorkingMemory QueryResult]))
 
 (deftype JavaQueryResult [result]
   QueryResult
@@ -32,19 +30,19 @@
 (deftype JavaWorkingMemory [session]
   WorkingMemory
 
-  (insert [this facts]
+  (insert [_this facts]
     (JavaWorkingMemory. (apply clara/insert session facts)))
 
-  (retract [this facts]
+  (retract [_this facts]
     (JavaWorkingMemory. (apply clara/retract session facts)))
 
-  (fireRules [this]
+  (fireRules [_this]
     (JavaWorkingMemory. (clara/fire-rules session)))
 
-  (query [this name args]
+  (query [_this name args]
    (run-query session name args))
 
-  (query [this name]
+  (query [_this name]
      (run-query session name {})))
 
 (defn mk-java-session [rulesets]

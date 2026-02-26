@@ -22,13 +22,13 @@
 
      UpdateCache
 
-     (add-insertions! [this facts]
+     (add-insertions! [_this facts]
        (.add updates (->PendingUpdate :insert facts)))
 
-     (add-retractions! [this facts]
+     (add-retractions! [_this facts]
        (.add updates (->PendingUpdate :retract facts)))
 
-     (get-updates-and-reset! [this]
+     (get-updates-and-reset! [_this]
        (let [n (.size updates)]
          (if (zero? n)
            []
@@ -63,13 +63,13 @@
 
      UpdateCache
 
-     (add-insertions! [this facts]
+     (add-insertions! [_this facts]
        (set! updates (conj updates (->PendingUpdate :insert facts))))
 
-     (add-retractions! [this facts]
+     (add-retractions! [_this facts]
        (set! updates (conj updates (->PendingUpdate :retract facts))))
 
-     (get-updates-and-reset! [this]
+     (get-updates-and-reset! [_this]
        (let [current-updates updates
              n (count current-updates)]
          (set! updates [])

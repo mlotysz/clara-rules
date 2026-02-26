@@ -1,15 +1,8 @@
 (ns clara.rules.dsl
   "Implementation of the defrule-style DSL for Clara. Most users should simply use the clara.rules namespace."
-  (:require [clojure.reflect :as reflect]
-            [clojure.core.reducers :as r]
-            [clojure.set :as s]
-            [clojure.string :as string]
-            [clojure.walk :as walk]
-            [clara.rules.engine :as eng]
+  (:require [clojure.walk :as walk]
             [clara.rules.compiler :as com]
-            [clara.rules.platform :as platform]
-            [clara.rules.schema :as schema]
-            [schema.core :as sc])
+            [clara.rules.platform :as platform])
   (:refer-clojure :exclude [qualified-keyword?]))
 
 ;; Let operators be symbols or keywords.
@@ -22,10 +15,10 @@
 (defn split-lhs-rhs
  "Given a rule with the =>, splits the left- and right-hand sides."
  [rule-body]
- (let [[lhs [sep & rhs]] (split-with #(not (separator? %)) rule-body)]
+ (let [[lhs [_sep & rhs]] (split-with #(not (separator? %)) rule-body)]
 
    {:lhs lhs
-    :rhs (when-not (empty? rhs)
+    :rhs (when (seq rhs)
            (conj rhs 'do))}))
 
 (defn- throw-dsl-ex
@@ -144,7 +137,7 @@
      {:constraints (vec (rest expression))})
 
 
-   :default
+   :else
    (parse-condition-or-accum expression expr-meta)))
 
 (defn- maybe-qualify
@@ -201,14 +194,14 @@
 
            ;; Finally, just return the symbol unchanged if it doesn't match anything above,
            ;; assuming it's a local parameter or variable.n
-           :default
+           :else
            sym)
 
           sym)))))
 
 (defn- qualify-meta
   "Qualify metadata associated with the symbol."
-  [env sym]
+  [_env sym]
   (if (:tag (meta sym))
     (vary-meta sym update-in [:tag] (fn [tag] (-> ^Class (resolve tag)
                                                   (.getName)
@@ -234,7 +227,7 @@
       (re-matches #"map__\d+" (name sym))))
 
 (defn- destructure-syms
-  [{:keys [args] :as condition}]
+  [{:keys [args]}]
   (if args
     (remove destructuring-sym? (eval `(let [~args nil] (local-syms))))))
 
@@ -263,10 +256,10 @@
      (cond-> rule
 
        ;; Add properties, if given.
-       (not (empty? properties)) (assoc :props properties)
+       (seq properties) (assoc :props properties)
 
        ;; Add the environment, if given.
-       (not (empty? env)) (assoc :env matching-env)))))
+       (seq env) (assoc :env matching-env)))))
 
 (defn parse-query*
   "Creates a query from the DSL syntax using the given environment map."
@@ -287,7 +280,7 @@
                               [(keyword (name sym)) sym]))]
 
      (cond-> query
-       (not (empty? env)) (assoc :env matching-env)))))
+       (seq env) (assoc :env matching-env)))))
 
 (defmacro parse-rule
   "Macro used to dynamically create a new rule using the DSL syntax."

@@ -79,12 +79,6 @@
   (and (symbol? expr)
        (.startsWith (name expr) "?")))
 
-(def ^:private reflector
-  "For some reason (bug?) the default reflector doesn't use the
-   Clojure dynamic class loader, which prevents reflecting on
-  `defrecords`.  Work around by supplying our own which does."
-  (clojure.reflect.JavaReflector. (clojure.lang.RT/makeClassLoader)))
-
 ;; This technique borrowed from Prismatic's schema library.
 (defn compiling-cljs?
   "Return true if we are currently generating cljs code.  Useful because cljx does not
@@ -205,7 +199,7 @@
       (cond
        (isa? type clojure.lang.IRecord) (get-field-accessors type)
        (class? type) (get-bean-accessors type) ; Treat unrecognized classes as beans.
-       :default []))))
+       :else []))))
 
 (defn- equality-expression? [expression]
   (let [qualify-when-sym #(when-let [resolved (and (symbol? %)
@@ -395,7 +389,7 @@
   (let [fact-type (if (symbol? fact-type)
                     (try
                       (resolve fact-type)
-                      (catch Exception e
+                      (catch Exception _e
                         ;; We shouldn't have to worry about exceptions being thrown here according
                         ;; to `resolve`s docs.
                         ;; However, due to http://dev.clojure.org/jira/browse/CLJ-1403 being open
@@ -531,7 +525,7 @@
    * an environment
 
    The function created here returns truthy if the given fact satisfies the criteria."
-  [node-id node-type {:keys [type constraints args] :as unification-condition} ancestor-bindings element-bindings env]
+  [node-id node-type {:keys [type constraints args] :as _unification-condition} ancestor-bindings element-bindings env]
   (let [accessors (field-name->accessors-used type constraints)
 
         destructured-env (if (> (count env) 0)
@@ -679,9 +673,10 @@
           (let [disjunctions (mapcat rest (filter #(#{:or} (expr-type %)) children))]
             (cons :or (concat disjunctions conjunctions))))))))
 
-(defn- non-equality-unification? [expression previously-bound]
+(defn- non-equality-unification?
   "Returns true if the given expression does a non-equality unification against a variable that
    is not in the previously-bound set, indicating it can't be solved by simple unification."
+  [expression previously-bound]
   (let [found-complex (atom false)
         process-form (fn [form]
                        (when (and (seq? form)
@@ -707,11 +702,11 @@
   (let [is-negation (= :not (first condition))
         is-exists (= :exists (first condition))
         accumulator (:accumulator condition)
-        result-binding (:result-binding condition) ; Get the optional result binding used by accumulators.
+        _result-binding (:result-binding condition) ; Get the optional result binding used by accumulators.
         condition (cond
                    is-negation (second condition)
                    accumulator (:from condition)
-                   :default condition)
+                   :else condition)
         node-type (cond
                    is-negation :negation
                    is-exists :exists
@@ -940,7 +935,7 @@
 (defn- non-equality-unifications
   "Returns a set of unifications that do not use equality-based checks."
   [constraints]
-  (let [[bound-variables unbound-variables] (classify-variables constraints)]
+  (let [[bound-variables _unbound-variables] (classify-variables constraints)]
     (into #{}
           (for [constraint constraints
                 :when (non-equality-unification? constraint bound-variables)]
@@ -1000,7 +995,7 @@
   "Compiles a function (fn [token] key-value) that extracts the sub-index key
    from the token's bindings. token-exprs are the token-side expressions from
    indexable equalities."
-  [node-id token-exprs ancestor-bindings]
+  [node-id token-exprs _ancestor-bindings]
   (let [token-binding-keys (into #{}
                                  (comp (mapcat flatten-expression)
                                        (filter is-variable?)
@@ -1019,7 +1014,7 @@
   "Compiles a function (fn [fact fact-bindings] key-value) that extracts the
    sub-index key from the fact and its element bindings. fact-exprs are the
    fact-side expressions from indexable equalities."
-  [node-id {:keys [type constraints args] :as condition} fact-exprs element-bindings]
+  [node-id {:keys [type constraints args]} fact-exprs element-bindings]
   (let [accessors (field-name->accessors-used type (concat constraints fact-exprs))
         destructured-fact (first args)
         fact-assignments (if destructured-fact
@@ -1050,7 +1045,7 @@
         condition (cond
                    (= :negation node-type) (second condition)
                    accumulator (:from condition)
-                   :default condition)
+                   :else condition)
 
         ;; Convert a test within a negation to a negation of the test. This is necessary
         ;; because negation nodes expect an additional condition to match against.
@@ -1193,7 +1188,7 @@
    negation expression."
   [previous-expressions :- [schema/Condition]
    expression :- schema/Condition
-   parent-ids :- [sc/Int]
+   _parent-ids :- [sc/Int]
    ancestor-bindings :- #{sc/Keyword}
    beta-graph :- schema/BetaGraph
    production :- schema/Production
@@ -1720,30 +1715,30 @@
                             (fn [k v] (cache/miss compiler-cache k v)))]
             (fn [nspace compilation-ctxs exprs]
               (let [indexed (map-indexed vector exprs)
-                    results (object-array (clojure.core/count exprs))]
-                ;; First pass: fill in any cached results.
-                (let [uncached (reduce (fn [uncached [^long idx expr]]
-                                        (let [cache-key [nspace expr]
-                                              cached-val (cache-get cache-key)]
-                                          (if (some? cached-val)
-                                            (do (aset results idx [cached-val (nth compilation-ctxs idx)])
-                                                uncached)
-                                            (conj uncached idx))))
-                                      []
-                                      indexed)]
-                  ;; Second pass: batch-eval uncached expressions.
-                  (when (seq uncached)
-                    (let [uncached-ctxs (mapv #(nth compilation-ctxs %) uncached)
-                          uncached-exprs (mapv #(nth exprs %) uncached)
-                          evaled (with-bindings (if nspace
-                                                  {#'*ns* (the-ns nspace)}
-                                                  {})
-                                   (batching-try-eval uncached-ctxs uncached-exprs))]
-                      (doseq [[i [evaled-fn _ctx]] (map vector uncached evaled)]
-                        (aset results i [evaled-fn (nth compilation-ctxs i)])
-                        ;; Cache the compiled fn keyed by [namespace expr-form].
-                        (cache-put [nspace (nth exprs i)] evaled-fn))))
-                  (vec results))))))]
+                    results (object-array (clojure.core/count exprs))
+                    ;; First pass: fill in any cached results.
+                    uncached (reduce (fn [uncached [^long idx expr]]
+                                      (let [cache-key [nspace expr]
+                                            cached-val (cache-get cache-key)]
+                                        (if (some? cached-val)
+                                          (do (aset results idx [cached-val (nth compilation-ctxs idx)])
+                                              uncached)
+                                          (conj uncached idx))))
+                                    []
+                                    indexed)]
+                ;; Second pass: batch-eval uncached expressions.
+                (when (seq uncached)
+                  (let [uncached-ctxs (mapv #(nth compilation-ctxs %) uncached)
+                        uncached-exprs (mapv #(nth exprs %) uncached)
+                        evaled (with-bindings (if nspace
+                                                {#'*ns* (the-ns nspace)}
+                                                {})
+                                 (batching-try-eval uncached-ctxs uncached-exprs))]
+                    (doseq [[i [evaled-fn _ctx]] (map vector uncached evaled)]
+                      (aset results i [evaled-fn (nth compilation-ctxs i)])
+                      ;; Cache the compiled fn keyed by [namespace expr-form].
+                      (cache-put [nspace (nth exprs i)] evaled-fn))))
+                (vec results)))))]
     (into {}
           cat
           ;; Grouping by ns, most expressions will not have a defined ns, only expressions from production nodes.
@@ -1783,7 +1778,7 @@
    is-root :- sc/Bool
    children :- [sc/Any]
    expr-fn-lookup :- schema/NodeFnLookup
-   new-bindings :- #{sc/Keyword}
+   _new-bindings :- #{sc/Keyword}
    left-parent-id :- (sc/maybe sc/Int)]
 
   (let [{:keys [condition production query join-bindings env]} beta-node
@@ -2003,7 +1998,7 @@
         ;; We sort the alpha nodes by the ordered sequence of the node ids they correspond to
         ;; in order to make the order of alpha nodes for any given type consistent.  Note that we
         ;; coerce to a vector because we need a type that is comparable.
-        condition-to-node-entries (sort-by (fn [[k v]] (-> v sort vec))
+        condition-to-node-entries (sort-by (fn [[_k v]] (-> v sort vec))
                                            condition-to-node-map)]
 
     ;; Compile conditions into functions.
@@ -2026,7 +2021,7 @@
                                   :children [sc/Num]}]
   [alpha-nodes :- [schema/AlphaNode]
    expr-fn-lookup :- schema/NodeFnLookup]
-  (for [{:keys [id condition beta-children env] :as node} alpha-nodes
+  (for [{:keys [id condition beta-children env] :as _node} alpha-nodes
         :let [{:keys [type constraints args]} condition]]
     (cond-> {:id id
              :type (effective-type type)
@@ -2043,7 +2038,7 @@
 ;; even though this is placed in a Java map.
 (deftype AlphaRootsWrapper [fact-type ^int fact-type-hash roots]
   Object
-  (equals [this other]
+  (equals [_this other]
     (let [other ^AlphaRootsWrapper other]
       (cond
 
@@ -2058,7 +2053,7 @@
 
   ;; Since know we will need to find the hashcode of this object in all cases just eagerly calculate it upfront
   ;; and avoid extra calls to hash later.
-  (hashCode [this] fact-type-hash))
+  (hashCode [_this] fact-type-hash))
 
 (defn- create-get-alphas-fn
   "Returns a function that given a sequence of facts,
@@ -2175,7 +2170,7 @@
                              entry))
 
         ;; type, alpha node tuples.
-        alpha-nodes (for [{:keys [id type alpha-fn children env discriminators] :as alpha-map} alpha-fns
+        alpha-nodes (for [{:keys [id type alpha-fn children env discriminators] :as _alpha-map} alpha-fns
                           :let [beta-children (map id-to-node children)
                                 node (eng/->AlphaNode id env beta-children alpha-fn type)]]
                       [type (if discriminators
@@ -2408,22 +2403,21 @@
                                       previous
                                       (conj! previous new-production)))
                                   (transient #{}))
-                          persistent!)]
+                          persistent!)
+         cache-opt (get options :cache true)
+         session-cache-atom (cond
+                              (false? cache-opt) nil
+                              (true? cache-opt) default-session-cache
+                              (nil? cache-opt) default-session-cache
+                              ;; A custom atom can be provided as the :cache value.
+                              :else cache-opt)
+         ;; Use hash-based key to avoid holding strong references to productions in the cache key.
+         ;; Dissoc cache-related options since they don't affect session compilation output.
+         cache-key (when session-cache-atom
+                     [(hash productions)
+                      (hash (dissoc options :cache :compiler-cache))])]
 
-     (let [cache-opt (get options :cache true)
-           session-cache-atom (cond
-                                (false? cache-opt) nil
-                                (true? cache-opt) default-session-cache
-                                (nil? cache-opt) default-session-cache
-                                ;; A custom atom can be provided as the :cache value.
-                                :else cache-opt)
-           ;; Use hash-based key to avoid holding strong references to productions in the cache key.
-           ;; Dissoc cache-related options since they don't affect session compilation output.
-           cache-key (when session-cache-atom
-                       [(hash productions)
-                        (hash (dissoc options :cache :compiler-cache))])]
-
-       (if session-cache-atom
-         (cache/lookup-or-miss session-cache-atom cache-key
-                               (fn [_] (mk-session* productions options)))
-         (mk-session* productions options))))))
+     (if session-cache-atom
+       (cache/lookup-or-miss session-cache-atom cache-key
+                             (fn [_] (mk-session* productions options)))
+       (mk-session* productions options)))))

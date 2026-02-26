@@ -139,7 +139,7 @@
             :condition condition}))
 
        ;; Remove generated bindings from user-facing explanation.
-       (into {} (remove (fn [[k v]]
+       (into {} (remove (fn [[k _v]]
                           #?(:clj (.startsWith (name k) "?__gen__"))
                           #?(:cljs (gstr/startsWith (name k) "?__gen__")))
                         bindings))))))
@@ -158,7 +158,7 @@
   [session]
 
   (let [{:keys [memory rulebase]} (eng/components session)
-        {:keys [productions production-nodes query-nodes]} rulebase
+        {:keys [_productions production-nodes _query-nodes]} rulebase
         rule-to-rule-node (into {} (for [rule-node production-nodes]
                                            [(:production rule-node) rule-node]))]
     (apply merge-with into
@@ -220,10 +220,10 @@
    The above segment will return matches for the rule in question."
   [session] :- InspectionSchema
   (let [{:keys [memory rulebase]} (eng/components session)
-        {:keys [productions production-nodes query-nodes id-to-node]} rulebase
+        {:keys [_productions production-nodes query-nodes id-to-node]} rulebase
 
         ;; Map of queries to their nodes in the network.
-        query-to-nodes (into {} (for [[query-name query-node] query-nodes]
+        query-to-nodes (into {} (for [[_query-name query-node] query-nodes]
                                   [(:query query-node) query-node]))
 
         ;; Map of rules to their nodes in the network.
@@ -282,7 +282,7 @@
   (clara.tools.inspect/explain-activations session
          :rule-filter-fn (fn [rule] (re-find my-rule-regex (:name rule))))"
 
-  [session & {:keys [rule-filter-fn] :as options}]
+  [session & {:keys [rule-filter-fn] :as _options}]
   (let [filter-fn (or rule-filter-fn (constantly true))]
 
     (doseq [[rule explanations] (:rule-matches (inspect session))
@@ -332,7 +332,7 @@
    Uses identity-based deduplication to distinguish identical-value facts inserted separately."
   [session]
   (let [{:keys [memory rulebase]} (eng/components session)
-        {:keys [production-nodes id-to-node]} rulebase
+        {:keys [production-nodes _id-to-node]} rulebase
 
         ;; Collect all facts from alpha memory, using identity wrappers for dedup.
         ;; Alpha memory stores Element records with :fact and :bindings fields.

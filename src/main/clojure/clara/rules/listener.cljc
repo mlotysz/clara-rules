@@ -29,39 +29,39 @@
 ;; A listener that does nothing.
 (deftype NullListener []
   ITransientEventListener
-  (left-activate! [listener node tokens]
+  (left-activate! [listener _node _tokens]
     listener)
-  (left-retract! [listener node tokens]
+  (left-retract! [listener _node _tokens]
     listener)
-  (right-activate! [listener node elements]
+  (right-activate! [listener _node _elements]
     listener)
-  (right-retract! [listener node elements]
+  (right-retract! [listener _node _elements]
     listener)
-  (insert-facts! [listener node token facts]
+  (insert-facts! [listener _node _token _facts]
     listener)
-  (alpha-activate! [listener node facts]
+  (alpha-activate! [listener _node _facts]
     listener)
-  (insert-facts-logical! [listener node token facts]
+  (insert-facts-logical! [listener _node _token _facts]
     listener)
-  (retract-facts! [listener node token facts]
+  (retract-facts! [listener _node _token _facts]
     listener)
-  (alpha-retract! [listener node facts]
+  (alpha-retract! [listener _node _facts]
     listener)
-  (retract-facts-logical! [listener node token facts]
+  (retract-facts-logical! [listener _node _token _facts]
     listener)
-  (add-accum-reduced! [listener node join-bindings result fact-bindings]
+  (add-accum-reduced! [listener _node _join-bindings _result _fact-bindings]
     listener)
-  (remove-accum-reduced! [listener node join-bindings fact-bindings]
+  (remove-accum-reduced! [listener _node _join-bindings _fact-bindings]
     listener)
-  (add-activations! [listener node activations]
+  (add-activations! [listener _node _activations]
     listener)
-  (remove-activations! [listener node activations]
+  (remove-activations! [listener _node _activations]
     listener)
-  (fire-activation! [listener activation resulting-operations]
+  (fire-activation! [listener _activation _resulting-operations]
     listener)
-  (fire-rules! [listener node]
+  (fire-rules! [listener _node]
     listener)
-  (activation-group-transition! [listener original-group new-group]
+  (activation-group-transition! [listener _original-group _new-group]
     listener)
   (to-persistent! [listener]
     listener)
@@ -75,80 +75,80 @@
 ;; A listener that simply delegates to others
 (deftype DelegatingListener [children]
   ITransientEventListener
-  (left-activate! [listener node tokens]
+  (left-activate! [_listener node tokens]
     (doseq [child children]
       (left-activate! child node tokens)))
 
-  (left-retract! [listener node tokens]
+  (left-retract! [_listener node tokens]
     (doseq [child children]
       (left-retract! child node tokens)))
 
-  (right-activate! [listener node elements]
+  (right-activate! [_listener node elements]
     (doseq [child children]
       (right-activate! child node elements)))
 
-  (right-retract! [listener node elements]
+  (right-retract! [_listener node elements]
     (doseq [child children]
       (right-retract! child node elements)))
 
-  (insert-facts! [listener node token facts]
+  (insert-facts! [_listener node token facts]
     (doseq [child children]
       (insert-facts! child node token facts)))
-  
-  (alpha-activate! [listener node facts]
+
+  (alpha-activate! [_listener node facts]
     (doseq [child children]
       (alpha-activate! child node facts)))
 
-  (insert-facts-logical! [listener node token facts]
+  (insert-facts-logical! [_listener node token facts]
     (doseq [child children]
       (insert-facts-logical! child node token facts)))
 
-  (retract-facts! [listener node token facts]
+  (retract-facts! [_listener node token facts]
     (doseq [child children]
       (retract-facts! child node token facts)))
-  
-  (alpha-retract! [listener node facts]
+
+  (alpha-retract! [_listener node facts]
     (doseq [child children]
       (alpha-retract! child node facts)))
 
-  (retract-facts-logical! [listener node token facts]
+  (retract-facts-logical! [_listener node token facts]
     (doseq [child children]
       (retract-facts-logical! child node token facts)))
 
-  (add-accum-reduced! [listener node join-bindings result fact-bindings]
+  (add-accum-reduced! [_listener node join-bindings result fact-bindings]
     (doseq [child children]
       (add-accum-reduced! child node join-bindings result fact-bindings)))
 
-  (remove-accum-reduced! [listener node join-bindings fact-bindings]
+  (remove-accum-reduced! [_listener node join-bindings fact-bindings]
     (doseq [child children]
       (remove-accum-reduced! child node join-bindings fact-bindings)))
 
-  (add-activations! [listener node activations]
+  (add-activations! [_listener node activations]
     (doseq [child children]
       (add-activations! child node activations)))
 
-  (remove-activations! [listener node activations]
+  (remove-activations! [_listener node activations]
     (doseq [child children]
       (remove-activations! child node activations)))
 
-  (fire-activation! [listener activation resulting-operations]
+  (fire-activation! [_listener activation resulting-operations]
     (doseq [child children]
       (fire-activation! child activation resulting-operations)))
 
-  (fire-rules! [listener node]
+  (fire-rules! [_listener node]
     (doseq [child children]
       (fire-rules! child node)))
 
-  (activation-group-transition! [listener original-group new-group]
+  (activation-group-transition! [_listener original-group new-group]
     (doseq [child children]
       (activation-group-transition! child original-group new-group)))
 
-  (to-persistent! [listener]
+  (to-persistent! [_listener]
     (delegating-listener (mapv to-persistent! children))))
 
 (deftype PersistentDelegatingListener [children]
   IPersistentEventListener
-  (to-transient [listener]
+  (to-transient [_listener]
     (DelegatingListener. (mapv to-transient children))))
 
 (defn delegating-listener

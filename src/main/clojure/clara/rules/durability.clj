@@ -12,7 +12,6 @@
   (:require [clara.rules.engine :as eng]
             [clara.rules.compiler :as com]
             [clara.rules.memory :as mem]
-            [clojure.set :as set]
             [schema.core :as s])
   (:import [clara.rules.compiler
             Rulebase]
@@ -20,8 +19,7 @@
             RuleOrderedActivation]
            [java.util
             List
-            Map
-            IdentityHashMap]))
+            Map]))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;; Rulebase serialization helpers.
@@ -230,14 +228,6 @@
    element]
   (nth (.get fact->idx-map element) 0))
 
-;;; Similar what is in clara.rules.memory currently, but just copied for now to avoid dependency issues.
-(defn- update-vals [m update-fn]
-  (->> m
-       (reduce-kv (fn [m k v]
-                    (assoc! m k (update-fn v)))
-                  (transient {}))
-       persistent!))
-
 (defn- index-bindings
   [seen bindings]
   (update-vals bindings
@@ -287,7 +277,7 @@
   (let [index-update-bindings-fn #(index-bindings seen %)
         index-facts (fn [facts]
                       (mapv #(find-index-or-add! seen %) facts))
-        index-update-accum-reduced (fn [node-id accum-reduced]
+        index-update-accum-reduced (fn [_node-id accum-reduced]
                                      (let [m (meta accum-reduced)]
                                        (if (::eng/accum-node m)
                                          ;; AccumulateNode

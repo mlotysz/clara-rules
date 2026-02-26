@@ -15,7 +15,7 @@
 (deftype FactWrapper [fact ^int fact-hash]
 
   Object
-  (equals [this other]
+  (equals [_this other]
 
     (cond
 
@@ -32,7 +32,7 @@
 
       :else (= fact (.fact ^FactWrapper other))))
 
-  (hashCode [this] fact-hash))
+  (hashCode [_this] fact-hash))
 
 
 ;;; These functions essentially allow us to use a Java map to create a set that stores
@@ -73,16 +73,15 @@
         it (.iterator (.entrySet m))]
     (loop []
       (when (.hasNext it)
-        (do (let [^java.util.Map$Entry e (.next it)
-                  fact (.fact ^FactWrapper (.getKey e))
-                  ^Iterable facts-in-val (.getValue e)
-                  fact-iter (.iterator facts-in-val)]
-              (loop []
-                (when (.hasNext fact-iter)
-                  (do
-                    (.add val-list (.next fact-iter))
-                    (recur)))))
-            (recur))))
+        (let [^java.util.Map$Entry e (.next it)
+              _fact (.fact ^FactWrapper (.getKey e))
+              ^Iterable facts-in-val (.getValue e)
+              fact-iter (.iterator facts-in-val)]
+          (loop []
+            (when (.hasNext fact-iter)
+              (.add val-list (.next fact-iter))
+              (recur))))
+        (recur)))
     ;; This list will never be exposed to the user; it is simply iterated over
     ;; by the engine and then discarded.  This being the case there is no
     ;; need to return a persistent data structure rather than an unmodifiable one.
@@ -101,7 +100,7 @@
 
   uc/UpdateCache
 
-  (add-insertions! [this facts]
+  (add-insertions! [_this facts]
     (let [fact-iter (.iterator ^Iterable facts)]
       (loop []
         (when (.hasNext fact-iter)
@@ -110,7 +109,7 @@
               (inc-fact-count! insertions fact))
             (recur))))))
 
-  (add-retractions! [this facts]
+  (add-retractions! [_this facts]
     (let [fact-iter (.iterator ^Iterable facts)]
       (loop []
         (when (.hasNext fact-iter)
@@ -119,7 +118,7 @@
               (inc-fact-count! retractions fact))
             (recur))))))
 
-  (get-updates-and-reset! [this]
+  (get-updates-and-reset! [_this]
     (let [retract-facts (when (-> retractions .size pos?)
                           (map->vals-concated retractions))
           insert-facts (when (-> insertions .size pos?)

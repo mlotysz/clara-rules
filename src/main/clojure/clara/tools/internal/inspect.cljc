@@ -16,42 +16,42 @@
     (to-persistent-listener @(.-activations listener)))
 
   ;; The methods below don't do anything; they aren't needed for this functionality.
-  (left-activate! [listener node tokens]
+  (left-activate! [listener _node _tokens]
     listener)
-  (left-retract! [listener node tokens]
+  (left-retract! [listener _node _tokens]
     listener)
-  (right-activate! [listener node elements]
+  (right-activate! [listener _node _elements]
     listener)
-  (right-retract! [listener node elements]
+  (right-retract! [listener _node _elements]
     listener)
-  (insert-facts! [listener node token facts]
+  (insert-facts! [listener _node _token _facts]
     listener)
-  (alpha-activate! [listener node facts]
+  (alpha-activate! [listener _node _facts]
     listener)
-  (insert-facts-logical! [listener node token facts]
+  (insert-facts-logical! [listener _node _token _facts]
     listener)
-  (retract-facts! [listener node token facts]
+  (retract-facts! [listener _node _token _facts]
     listener)
-  (alpha-retract! [listener node facts]
+  (alpha-retract! [listener _node _facts]
     listener)
-  (retract-facts-logical! [listener node token facts]
+  (retract-facts-logical! [listener _node _token _facts]
     listener)
-  (add-accum-reduced! [listener node join-bindings result fact-bindings]
+  (add-accum-reduced! [listener _node _join-bindings _result _fact-bindings]
     listener)
-  (remove-accum-reduced! [listener node join-bindings fact-bindings]
+  (remove-accum-reduced! [listener _node _join-bindings _fact-bindings]
     listener)
-  (add-activations! [listener node activations]
+  (add-activations! [listener _node _activations]
     listener)
-  (remove-activations! [listener node activations]
+  (remove-activations! [listener _node _activations]
     listener)
-  (activation-group-transition! [listener previous-group new-group]
+  (activation-group-transition! [listener _previous-group _new-group]
     listener)
-  (fire-rules! [listener node]
+  (fire-rules! [listener _node]
     listener))
 
 (deftype PersistentActivationListener [activations]
   l/IPersistentEventListener
-  (to-transient [listener]
+  (to-transient [_listener]
     (TransientActivationListener. (atom activations))))
 
 (defn to-persistent-listener

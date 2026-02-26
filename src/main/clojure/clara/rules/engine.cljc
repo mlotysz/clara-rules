@@ -1,7 +1,6 @@
 (ns clara.rules.engine
   "This namespace is for internal use and may move in the future. Most users should use only the clara.rules namespace."
-  (:require [clojure.reflect :as reflect]
-            [clojure.core.reducers :as r]
+  (:require [clojure.core.reducers :as r]
             [schema.core :as s]
             [clojure.string :as string]
             [clara.rules.memory :as mem]
@@ -272,7 +271,7 @@
    some items to flush, false otherwise"
   [current-session]
   (letfn [(flush-all [current-session flushed-items?]
-            (let [{:keys [rulebase transient-memory transport insertions get-alphas-fn listener]} current-session
+            (let [{:keys [_rulebase transient-memory transport _insertions get-alphas-fn listener]} current-session
                   pending-updates (-> current-session :pending-updates uc/get-updates-and-reset!)]
 
               (if (empty? pending-updates)
@@ -313,7 +312,7 @@
   This should only be used for facts explicitly retracted in a RHS.
   It should not be used for retractions that occur as part of automatic truth maintenance."
   [facts]
-  (let [{:keys [rulebase transient-memory transport insertions get-alphas-fn listener]} *current-session*
+  (let [{:keys [_rulebase transient-memory transport insertions get-alphas-fn listener]} *current-session*
         {:keys [node token]} @(:rule-context *current-session*)]
     ;; Update the count so the rule engine will know when we have normalized.
     (vswap! insertions + (count facts))
@@ -330,7 +329,7 @@
   "Perform the actual fact insertion, optionally making them unconditional.  This should only
    be called once per rule activation for logical insertions."
   [facts unconditional]
-  (let [{:keys [rulebase transient-memory transport insertions get-alphas-fn listener]} *current-session*
+  (let [{:keys [_rulebase transient-memory _transport insertions _get-alphas-fn listener]} *current-session*
         {:keys [node token]} @(:rule-context *current-session*)]
 
     ;; Update the insertion count.
@@ -353,7 +352,7 @@
 ;; Record for the production node in the Rete network.
 (defrecord ProductionNode [id production rhs]
   ILeftActivate
-  (left-activate [node join-bindings tokens memory transport listener]
+  (left-activate [node _join-bindings tokens memory _transport listener]
 
     ;; Provide listeners information on all left-activate calls,
     ;; but we don't store these tokens in the beta-memory since the production-memory
@@ -374,7 +373,7 @@
         ;; The production matched, so add the tokens to the activation list.
         (mem/add-activations! memory production activations))))
 
-  (left-retract [node join-bindings tokens memory transport listener]
+  (left-retract [node join-bindings tokens memory _transport listener]
 
     ;; Provide listeners information on all left-retract calls for passivity,
     ;; but we don't store these tokens in the beta-memory since the production-memory
@@ -415,14 +414,13 @@
           ;; because of an activation of the current rule that is :no-loop
           (when (or (not (get-in production [:props :no-loop]))
                     (not (= production (some-> *current-session* :rule-context deref :node :production))))
-            (do
-              ;; Notify the listener of logical retractions.
-              ;; Note that this notification happens immediately, while the
-              ;; alpha-retract notification on matching alpha nodes will happen when the
-              ;; retraction is actually removed from the buffer and executed in the rules network.
-              (doseq [[token token-insertions] token-insertion-map]
-                (l/retract-facts-logical! listener node token token-insertions))
-              (retract-facts! insertions)))
+            ;; Notify the listener of logical retractions.
+            ;; Note that this notification happens immediately, while the
+            ;; alpha-retract notification on matching alpha nodes will happen when the
+            ;; retraction is actually removed from the buffer and executed in the rules network.
+            (doseq [[token token-insertions] token-insertion-map]
+              (l/retract-facts-logical! listener node token token-insertions))
+            (retract-facts! insertions))
 
           ;; Any session implementation is required to bind this during external retractions and insertions.
           *pending-external-retractions*
@@ -438,31 +436,31 @@
                            :join-bindings join-bindings
                            :tokens tokens}))))))
 
-  (get-join-keys [node] [])
+  (get-join-keys [_node] [])
 
-  (description [node] "ProductionNode")
+  (description [_node] "ProductionNode")
 
   ITerminalNode
-  (terminal-node-type [this] [:production (:name production)]))
+  (terminal-node-type [_this] [:production (:name production)]))
 
 ;; The QueryNode is a terminal node that stores the
 ;; state that can be queried by a rule user.
 (defrecord QueryNode [id query param-keys]
   ILeftActivate
-  (left-activate [node join-bindings tokens memory transport listener]
+  (left-activate [node join-bindings tokens memory _transport listener]
     (l/left-activate! listener node tokens)
     (mem/add-tokens! memory node join-bindings tokens))
 
-  (left-retract [node join-bindings tokens memory transport listener]
+  (left-retract [node join-bindings tokens memory _transport listener]
     (l/left-retract! listener node tokens)
     (mem/remove-tokens! memory node join-bindings tokens))
 
-  (get-join-keys [node] param-keys)
+  (get-join-keys [_node] param-keys)
 
-  (description [node] (str "QueryNode -- " query))
+  (description [_node] (str "QueryNode -- " query))
 
   ITerminalNode
-  (terminal-node-type [this] [:query (:name query)]))
+  (terminal-node-type [_this] [:query (:name query)]))
 
 
 (defn node-rule-names
@@ -486,7 +484,8 @@
                           (map #(str prefix "  " %))
                           (string/join "\n"))]
     (if (pos? (count names))
-      (str prefix plural ":\n" names-string "\n"))))
+      (str prefix plural ":\n" names-string "\n")
+      nil)))
 
 
 (defn- single-condition-message
@@ -578,7 +577,7 @@
 (defrecord FusedAlphaNode [id entries fact-type]
   ;; entries: vector of {:id, :env, :children, :activation, :node (original AlphaNode)}
   IAlphaActivate
-  (alpha-activate [this facts memory transport listener]
+  (alpha-activate [_this facts memory transport listener]
     (let [n (count entries)
           slots (object-array n)]
       ;; For each fact, try each entry's activation
@@ -606,7 +605,7 @@
                 (l/alpha-activate! listener (:node entry) (mapv :fact elements)))
               (send-elements transport memory listener (:children entry) elements)))))))
 
-  (alpha-retract [this facts memory transport listener]
+  (alpha-retract [_this facts memory transport listener]
     (let [n (count entries)
           slots (object-array n)]
       ;; For each fact, try each entry's activation
@@ -643,7 +642,7 @@
   ;; default-indices: int-array of indices for entries WITHOUT the discriminated constraint
   ;; entries: vector of {:id :env :children :activation :node} (same as FusedAlphaNode)
   IAlphaActivate
-  (alpha-activate [this facts memory transport listener]
+  (alpha-activate [_this facts memory transport listener]
     (let [n (count entries)
           slots (object-array n)]
       (doseq [fact facts]
@@ -693,7 +692,7 @@
                 (l/alpha-activate! listener (:node entry) (mapv :fact elements)))
               (send-elements transport memory listener (:children entry) elements)))))))
 
-  (alpha-retract [this facts memory transport listener]
+  (alpha-retract [_this facts memory transport listener]
     (let [n (count entries)
           slots (object-array n)]
       (doseq [fact facts]
@@ -795,7 +794,7 @@
                               alpha-nodes)]
       (if (>= (count indexed-discs) 2)
         ;; Try to build a discrimination node
-        (if-let [{:keys [field coverage entries-info]}
+        (if-let [{:keys [field _coverage entries-info]}
                  (when-let [best (best-discriminating-field indexed-discs)]
                    {:field (:field best)
                     :coverage (:coverage best)
@@ -831,19 +830,19 @@
 
 (defrecord RootJoinNode [id condition children binding-keys]
   ILeftActivate
-  (left-activate [node join-bindings tokens memory transport listener]
+  (left-activate [_node _join-bindings _tokens _memory _transport _listener]
     ;; This specialized root node doesn't need to deal with the
     ;; empty token, so do nothing.
     )
 
-  (left-retract [node join-bindings tokens memory transport listener]
+  (left-retract [_node _join-bindings _tokens _memory _transport _listener]
     ;; The empty token can't be retracted from the root node,
     ;; so do nothing.
     )
 
-  (get-join-keys [node] binding-keys)
+  (get-join-keys [_node] binding-keys)
 
-  (description [node] (str "RootJoinNode -- " (:text condition)))
+  (description [_node] (str "RootJoinNode -- " (:text condition)))
 
   IRightActivate
   (right-activate [node join-bindings elements memory transport listener]
@@ -882,7 +881,7 @@
            (mem/remove-elements! memory node join-bindings elements))))
 
   IConditionNode
-  (get-condition-description [this]
+  (get-condition-description [_this]
     (let [{:keys [type constraints]} condition]
       (into [type] constraints))))
 
@@ -940,9 +939,9 @@
                        (->Token (conj (:matches token) (match-pair fact id)) (conj (:bindings token) fact-bindings))))
                    elements)))))))
 
-  (get-join-keys [node] binding-keys)
+  (get-join-keys [_node] binding-keys)
 
-  (description [node] (str "JoinNode -- " (:text condition)))
+  (description [_node] (str "JoinNode -- " (:text condition)))
 
   IRightActivate
   (right-activate [node join-bindings elements memory transport listener]
@@ -976,7 +975,7 @@
          listener
          children
          (if (next elements)
-           (platform/eager-for [{:keys [fact bindings] :as element} elements
+           (platform/eager-for [{:keys [fact bindings] :as _element} elements
                                 :let [mp (match-pair fact id)]
                                 token tokens]
                                (->Token (conj (:matches token) mp) (conj (:bindings token) bindings)))
@@ -997,7 +996,7 @@
          listener
          children
          (if (next removed-elements)
-           (platform/eager-for [{:keys [fact bindings] :as element} removed-elements
+           (platform/eager-for [{:keys [fact bindings] :as _element} removed-elements
                                 :let [mp (match-pair fact id)]
                                 token tokens]
                                (->Token (conj (:matches token) mp) (conj (:bindings token) bindings)))
@@ -1008,7 +1007,7 @@
                    tokens)))))))
 
   IConditionNode
-  (get-condition-description [this]
+  (get-condition-description [_this]
     (let [{:keys [type constraints]} condition]
       (into [type] constraints))))
 
@@ -1154,9 +1153,9 @@
                                           (conj (:bindings token) fact-bindings beta-bindings))))))
                      elements))))))))
 
-  (get-join-keys [node] binding-keys)
+  (get-join-keys [_node] binding-keys)
 
-  (description [node] (str "JoinNode -- " (:text condition)))
+  (description [_node] (str "JoinNode -- " (:text condition)))
 
   IRightActivate
   (right-activate [node join-bindings elements memory transport listener]
@@ -1170,7 +1169,7 @@
          transport memory listener children
          (if (next elements)
            (let [token-index (group-by token-key-fn tokens)]
-             (platform/eager-for [{:keys [fact bindings] :as element} elements
+             (platform/eager-for [{:keys [fact bindings] :as _element} elements
                                   :let [key (element-key-fn fact bindings)
                                         mp (match-pair fact id)]
                                   token (get token-index key [])
@@ -1200,7 +1199,7 @@
          listener
          children
          (if (next elements)
-           (platform/eager-for [{:keys [fact bindings] :as element} elements
+           (platform/eager-for [{:keys [fact bindings] :as _element} elements
                                 :let [mp (match-pair fact id)]
                                 token tokens
                                 :let [beta-bindings (join-node-matches node join-filter-fn token fact bindings {})]
@@ -1228,7 +1227,7 @@
            transport memory listener children
            (if (next removed-elements)
              (let [token-index (group-by token-key-fn tokens)]
-               (platform/eager-for [{:keys [fact bindings] :as element} removed-elements
+               (platform/eager-for [{:keys [fact bindings] :as _element} removed-elements
                                     :let [key (element-key-fn fact bindings)
                                           mp (match-pair fact id)]
                                     token (get token-index key [])
@@ -1258,7 +1257,7 @@
            listener
            children
            (if (next removed-elements)
-             (platform/eager-for [{:keys [fact bindings] :as element} removed-elements
+             (platform/eager-for [{:keys [fact bindings] :as _element} removed-elements
                                   :let [mp (match-pair fact id)]
                                   token tokens
                                   :let [beta-bindings (join-node-matches node join-filter-fn token fact bindings {})]
@@ -1276,7 +1275,7 @@
                      tokens))))))))
 
   IConditionNode
-  (get-condition-description [this]
+  (get-condition-description [_this]
     (let [{:keys [type constraints original-constraints]} condition
           full-constraints (if (seq original-constraints)
                              original-constraints
@@ -1301,9 +1300,9 @@
     (when (empty? (mem/get-elements memory node join-bindings))
       (retract-tokens transport memory listener children tokens)))
 
-  (get-join-keys [node] binding-keys)
+  (get-join-keys [_node] binding-keys)
 
-  (description [node] (str "NegationNode -- " (:text condition)))
+  (description [_node] (str "NegationNode -- " (:text condition)))
 
   IRightActivate
   (right-activate [node join-bindings elements memory transport listener]
@@ -1325,7 +1324,7 @@
       (send-tokens transport memory listener children (mem/get-tokens memory node join-bindings))))
 
   IConditionNode
-  (get-condition-description [this]
+  (get-condition-description [_this]
     (let [{:keys [type constraints]} condition]
       [:not (into [type] constraints)])))
 
@@ -1381,9 +1380,9 @@
                                                                            condition))]
                                           token))))
 
-  (get-join-keys [node] binding-keys)
+  (get-join-keys [_node] binding-keys)
 
-  (description [node] (str "NegationWithJoinFilterNode -- " (:text condition)))
+  (description [_node] (str "NegationWithJoinFilterNode -- " (:text condition)))
 
   IRightActivate
   (right-activate [node join-bindings elements memory transport listener]
@@ -1445,7 +1444,7 @@
                                        token))))
 
   IConditionNode
-  (get-condition-description [this]
+  (get-condition-description [_this]
     (let [{:keys [type constraints original-constraints]} condition
           full-constraints (if (seq original-constraints)
                              original-constraints
@@ -1468,7 +1467,7 @@
 ;; performs no joins it does not accept right activations or retractions.
 (defrecord TestNode [id env constraints test children]
   ILeftActivate
-  (left-activate [node join-bindings tokens memory transport listener]
+  (left-activate [node _join-bindings tokens memory transport listener]
     (l/left-activate! listener node tokens)
     (send-tokens
      transport
@@ -1480,16 +1479,16 @@
        :when (test-node-matches node test env token)]
       token)))
 
-  (left-retract [node join-bindings tokens memory transport listener]
+  (left-retract [node _join-bindings tokens memory transport listener]
     (l/left-retract! listener node tokens)
     (retract-tokens transport memory listener children tokens))
 
-  (get-join-keys [node] [])
+  (get-join-keys [_node] [])
 
-  (description [node] (str "TestNode -- " (:text test)))
+  (description [_node] (str "TestNode -- " (:text test)))
 
   IConditionNode
-  (get-condition-description [this]
+  (get-condition-description [_this]
     (into [:test] constraints)))
 
 ;; Constant fallback value for accum-reduced when no previous result exists.
@@ -1512,7 +1511,7 @@
 
 (defn- retract-accumulated
   "Helper function to retract an accumulated value."
-  [node accum-condition accumulator result-binding token converted-result fact-bindings transport memory listener]
+  [node _accum-condition _accumulator result-binding token converted-result fact-bindings transport memory listener]
   (let [new-facts (conj (:matches token) (match-pair converted-result (:id node)))
         new-bindings (cond-> (conj (:bindings token) fact-bindings)
                        result-binding (assoc result-binding converted-result))]
@@ -1522,7 +1521,7 @@
 
 (defn- send-accumulated
   "Helper function to send the result of an accumulated value to the node's children."
-  [node accum-condition accumulator result-binding token converted-result fact-bindings transport memory listener]
+  [node _accum-condition _accumulator result-binding token converted-result fact-bindings transport memory listener]
   (let [new-bindings (cond-> (conj (:bindings token) fact-bindings)
                        result-binding (assoc result-binding converted-result))
 
@@ -1645,7 +1644,7 @@
             ;; and element group share the same join bindings, but the element groups may have additional bindings
             ;; that come from their alpha nodes. Keep in mind that these element groups need elements to be created
             ;; and cannot come from initial values if they have bindings that are not shared with tokens.
-            [fact-bindings [previous previous-reduced]] previous-results
+            [fact-bindings [_previous previous-reduced]] previous-results
             :let [;; If there were tokens before that are now removed, the value would have been accumulated already.
                   ;; This means there is no need to check for ::not-reduced here.
                   previous-converted (when (some? previous-reduced)
@@ -1656,12 +1655,12 @@
       (retract-accumulated node accum-condition accumulator result-binding token previous-converted fact-bindings
                            transport memory listener)))
 
-  (get-join-keys [node] binding-keys)
+  (get-join-keys [_node] binding-keys)
 
-  (description [node] (str "AccumulateNode -- " accumulator))
+  (description [_node] (str "AccumulateNode -- " accumulator))
 
   IAccumRightActivate
-  (pre-reduce [node elements]
+  (pre-reduce [_node elements]
     ;; Return a seq tuples with the form [binding-group facts-from-group-elements].
     (platform/eager-for [[bindings element-group] (platform/group-by-seq :bindings elements)]
                         [bindings (mapv :fact element-group)]))
@@ -1883,7 +1882,7 @@
                                   transport memory listener))))))))
 
   IConditionNode
-  (get-condition-description [this]
+  (get-condition-description [_this]
     (let [{:keys [accumulator from]} accum-condition
           {:keys [type constraints]} from
           condition (into [type] constraints)
@@ -1976,7 +1975,7 @@
                                 converted-result join-bindings transport memory listener))))
 
         ;; Propagate nothing if the above conditions don't apply.
-        :default nil)))
+        :else nil)))
 
   (left-retract [node join-bindings tokens memory transport listener]
 
@@ -2026,12 +2025,12 @@
 
         :else nil)))
 
-  (get-join-keys [node] binding-keys)
+  (get-join-keys [_node] binding-keys)
 
-  (description [node] (str "AccumulateWithBetaPredicateNode -- " accumulator))
+  (description [_node] (str "AccumulateWithBetaPredicateNode -- " accumulator))
 
   IAccumRightActivate
-  (pre-reduce [node elements]
+  (pre-reduce [_node elements]
     ;; Return a map of bindings to the candidate facts that match them. This accumulator
     ;; depends on the values from parent facts, so we defer actually running the accumulator
     ;; until we have a token.
@@ -2222,7 +2221,7 @@
             (send-accumulated node accum-condition accumulator result-binding token new-converted bindings transport memory listener))))))
 
   IConditionNode
-  (get-condition-description [this]
+  (get-condition-description [_this]
     (let [{:keys [accumulator from]} accum-condition
           {:keys [type constraints original-constraints]} from
           result-symbol (symbol (name result-binding))
@@ -2285,7 +2284,7 @@
 
 (defn fire-rules*
   "Fire rules for the given nodes."
-  [rulebase nodes transient-memory transport listener get-alphas-fn update-cache]
+  [rulebase _nodes transient-memory transport listener get-alphas-fn update-cache]
   ;; Hoist per-activation volatiles before the loop to avoid re-allocating them on every activation.
   ;; They are vreset! to [] before each RHS call.
   (let [batched-logical-insertions (volatile! [])
@@ -2405,7 +2404,7 @@
 
 (deftype LocalSession [rulebase memory transport listener get-alphas-fn pending-operations]
   ISession
-  (insert [session facts]
+  (insert [_session facts]
 
     (let [new-pending-operations (conj pending-operations (uc/->PendingUpdate :insertion
                                                                               ;; Preserve the behavior prior to https://github.com/cerner/clara-rules/issues/268
@@ -2424,7 +2423,7 @@
                      get-alphas-fn
                      new-pending-operations)))
 
-  (retract [session facts]
+  (retract [_session facts]
 
     (let [new-pending-operations (conj pending-operations (uc/->PendingUpdate :retraction
                                                                               ;; As in insert above defend against facts being a mutable collection.
@@ -2495,7 +2494,8 @@
         #?(:cljs (throw (ex-info "The :cancelling option is not supported in ClojureScript"
                                  {:session session :opts opts}))
 
-           :clj (let [insertions (sequence
+           :clj (let [_ session
+                      insertions (sequence
                                   (comp (filter (fn [pending-op]
                                                   (= (:type pending-op)
                                                      :insertion)))
@@ -2548,7 +2548,7 @@
                      get-alphas-fn
                      [])))
 
-  (query [session query params]
+  (query [_session query params]
     (let [query-node (get-in rulebase [:query-nodes query])]
       (when (= nil query-node)
         (platform/throw-error (str "The query " query " is invalid or not included in the rule base.")))
@@ -2565,11 +2565,11 @@
                   ;; Filter generated symbols. We check first since this is an uncommon flow.
                   (if (some #(re-find #"__gen" (name %)) (keys bindings))
 
-                    (into {} (remove (fn [[k v]] (re-find #"__gen"  (name k)))
+                    (into {} (remove (fn [[k _v]] (re-find #"__gen"  (name k)))
                                      bindings))
                     bindings))))))
 
-  (components [session]
+  (components [_session]
     {:rulebase rulebase
      :memory memory
      :transport transport
@@ -2606,19 +2606,19 @@
 
 (deftype ReadOnlyLocalSession [rulebase memory transport listener get-alphas-fn]
   ISession
-  (insert [session facts]
+  (insert [_session _facts]
     (throw-unsupported-read-only-operation "insert"))
 
-  (retract [session facts]
+  (retract [_session _facts]
     (throw-unsupported-read-only-operation "retract"))
 
-  (fire-rules [session]
+  (fire-rules [_session]
     (throw-unsupported-read-only-operation "fire-rules"))
 
-  (fire-rules [session opts]
+  (fire-rules [_session _opts]
     (throw-unsupported-read-only-operation "fire-rules"))
 
-  (query [session query params]
+  (query [_session query params]
     (let [query-node (get-in rulebase [:query-nodes query])]
       (when (= nil query-node)
         (platform/throw-error (str "The query " query " is invalid or not included in the rule base.")))
@@ -2630,11 +2630,11 @@
       (->> (mem/get-tokens memory query-node params)
            (map (fn [{bindings :bindings}]
                   (if (some #(re-find #"__gen" (name %)) (keys bindings))
-                    (into {} (remove (fn [[k v]] (re-find #"__gen" (name k)))
+                    (into {} (remove (fn [[k _v]] (re-find #"__gen" (name k)))
                                      bindings))
                     bindings))))))
 
-  (components [session]
+  (components [_session]
     {:rulebase rulebase
      :memory memory
      :transport transport

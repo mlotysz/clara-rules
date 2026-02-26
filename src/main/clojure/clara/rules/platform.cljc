@@ -26,11 +26,11 @@
    (deftype JavaEqualityWrapper [wrapped ^int hash-code]
 
      Object
-     (equals [this other]
+     (equals [_this other]
        (and (instance? JavaEqualityWrapper other)
             (= wrapped (.wrapped ^JavaEqualityWrapper other))))
 
-     (hashCode [this]
+     (hashCode [_this]
        hash-code)))
 
 #?(:clj
@@ -114,19 +114,19 @@
 #?(:clj
    (deftype FactIdentityWrapper [wrapped ^int id-hash]
      Object
-     (equals [this other]
+     (equals [_this other]
        (and (instance? FactIdentityWrapper other)
             (identical? wrapped (.wrapped ^FactIdentityWrapper other))))
-     (hashCode [this]
+     (hashCode [_this]
        id-hash))
    :cljs
    (deftype FactIdentityWrapper [wrapped]
      IEquiv
-     (-equiv [this other]
+     (-equiv [_this other]
        (and (instance? FactIdentityWrapper other)
             (identical? wrapped (.-wrapped other))))
      IHash
-     (-hash [this]
+     (-hash [_this]
        (hash wrapped))))
 
 (defn fact-id-wrap

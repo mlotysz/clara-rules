@@ -1,7 +1,6 @@
 (ns clara.rules.memory
   "This namespace is for internal use and may move in the future.
-   Specification and default implementation of working memory"
-  (:require [clojure.set :as s]))
+   Specification and default implementation of working memory")
 
 ;; Activation record used by get-activations and add-activations! below.
 (defrecord Activation [node token])
@@ -156,11 +155,11 @@
      dest))
 
 #?(:clj
-   (defn- ^java.util.List ->linked-list
+   (defn- ->linked-list
      "Creates a new java.util.LinkedList from the coll, but avoids using
-      Collection.addAll(Collection) since there is unnecessary overhead 
+      Collection.addAll(Collection) since there is unnecessary overhead
       in this of calling Collection.toArray() on coll."
-     [coll]
+     ^java.util.List [coll]
      (if (instance? java.util.LinkedList coll)
        coll
        (add-all! (java.util.LinkedList.) coll))))
@@ -347,7 +346,7 @@
      ;; use Clojure equality to determine this while placing the wrapper in a Java data
      ;; structure that uses Java equality; the Java equality check will simply end up calling
      ;; Clojure equality checks.
-     (equals [this other]
+     (equals [_this other]
        ;; Note that the .equals method is only called by PriorityQueue.remove, and the object provided
        ;; to the .remove method will never be identical to any object in the queue.  A short-circuiting
        ;; check for reference equality would therefore be pointless here because it would never be true.
@@ -433,57 +432,57 @@
                                ^:unsynchronized-mutable #?(:clj ^java.util.NavigableMap activation-map :cljs activation-map)]
 
   IMemoryReader
-  (get-rulebase [memory] rulebase)
+  (get-rulebase [_memory] rulebase)
 
-  (get-alphas-fn [memory] alphas-fn)
+  (get-alphas-fn [_memory] alphas-fn)
 
-  (get-elements [memory node bindings]
+  (get-elements [_memory node bindings]
     (get (get alpha-memory (:id node) {})
          bindings
          []))
 
-  (get-elements-all [memory node]
+  (get-elements-all [_memory node]
     (sequence
      cat
      (vals
       (get alpha-memory (:id node) {}))))
 
-  (get-tokens [memory node bindings]
+  (get-tokens [_memory node bindings]
     (get (get beta-memory (:id node) {})
          bindings
          []))
 
-  (get-tokens-all [memory node]
+  (get-tokens-all [_memory node]
     (sequence
      cat
      (vals (get beta-memory (:id node) {}))))
 
-  (get-accum-reduced [memory node join-bindings fact-bindings]
+  (get-accum-reduced [_memory node join-bindings fact-bindings]
     (get (get (get accum-memory (:id node)) join-bindings) fact-bindings ::no-accum-reduced))
 
-  (get-accum-reduced-all [memory node join-bindings]
+  (get-accum-reduced-all [_memory node join-bindings]
     (get
      (get accum-memory (:id node) {})
      join-bindings))
 
   ;; TODO: rename existing get-accum-reduced-all and use something better here.
-  (get-accum-reduced-complete [memory node]
+  (get-accum-reduced-complete [_memory node]
     (for [[join-binding joins] (get accum-memory (:id node) {})
           [fact-binding reduced] joins]
       {:join-bindings join-binding
        :fact-bindings fact-binding
        :result reduced}))
 
-  (get-insertions [memory node token]
+  (get-insertions [_memory node token]
     (get
      (get production-memory (:id node) {})
      token
      []))
 
-  (get-insertions-all [memory node]
+  (get-insertions-all [_memory node]
     (get production-memory (:id node) {}))
 
-  (get-activations [memory]
+  (get-activations [_memory]
     (into []
           (comp cat
                 (map (fn [^RuleOrderedActivation a]
@@ -492,7 +491,7 @@
 
   ITransientMemory
   #?(:clj
-      (add-elements! [memory node join-bindings elements]
+      (add-elements! [_memory node join-bindings elements]
                      (let [binding-element-map (get alpha-memory (:id node) {})
                            previous-elements (get binding-element-map join-bindings)]
 
@@ -522,7 +521,7 @@
                                               join-bindings
                                               elements))))))
       :cljs
-      (add-elements! [memory node join-bindings elements]
+      (add-elements! [_memory node join-bindings elements]
                      (let [binding-element-map (get alpha-memory (:id node) {})
                            previous-elements (get binding-element-map join-bindings [])]
 
@@ -531,7 +530,7 @@
                                      (:id node)
                                      (assoc binding-element-map join-bindings (into previous-elements elements)))))))
 
-  (remove-elements! [memory node join-bindings elements]
+  (remove-elements! [_memory node join-bindings elements]
     #?(:clj
        ;; Do nothing when no elements to remove.
        (when-not (coll-empty? elements)
@@ -586,7 +585,7 @@
          ;; Return the removed elements.
          removed-elements)))
 
-  (add-tokens! [memory node join-bindings tokens]
+  (add-tokens! [_memory node join-bindings tokens]
     #?(:clj
        (let [binding-token-map (get beta-memory (:id node) {})
              previous-tokens (get binding-token-map join-bindings)]
@@ -619,7 +618,7 @@
                        (:id node)
                        (assoc binding-token-map join-bindings (into previous-tokens tokens)))))))
 
-  (remove-tokens! [memory node join-bindings tokens]
+  (remove-tokens! [_memory node join-bindings tokens]
     #?(:clj
        ;; The reasoning here is the same as remove-elements!
        (when-not (coll-empty? tokens)
@@ -689,7 +688,7 @@
          ;; Return the removed tokens.
          removed-tokens)))
 
-  (add-accum-reduced! [memory node join-bindings accum-result fact-bindings]
+  (add-accum-reduced! [_memory node join-bindings accum-result fact-bindings]
     (let [node-id (:id node)
           node-mem (get accum-memory node-id {})]
       (set! accum-memory
@@ -701,7 +700,7 @@
                                   fact-bindings
                                   accum-result))))))
 
-  (remove-accum-reduced! [memory node join-bindings fact-bindings]
+  (remove-accum-reduced! [_memory node join-bindings fact-bindings]
     (let [node-id (:id node)
           node-id-mem (get accum-memory node-id {})
           join-mem (dissoc (get node-id-mem join-bindings) fact-bindings)
@@ -719,14 +718,14 @@
   ;; The value under each token in the map should be a sequence
   ;; of sequences of facts, with each inner sequence coming from a single
   ;; rule activation.
-  (add-insertions! [memory node token facts]
+  (add-insertions! [_memory node token facts]
     (let [token-facts-map (get production-memory (:id node) {})]
       (set! production-memory
             (assoc! production-memory
                     (:id node)
                     (update token-facts-map token conj facts)))))
 
-  (remove-insertions! [memory node tokens]
+  (remove-insertions! [_memory node tokens]
 
     ;; Remove the facts inserted from the given token.
     (let [token-facts-map (get production-memory (:id node) {})
@@ -766,7 +765,7 @@
 
   #?(:clj
       (add-activations!
-        [memory production new-activations]
+        [_memory production new-activations]
         (let [activation-group (activation-group-fn production)
               previous (.get activation-map activation-group)]
           ;; The reasoning here is the same as in add-elements! impl above.
@@ -780,7 +779,7 @@
                   (->activation-priority-queue new-activations)))))
       :cljs
       (add-activations!
-        [memory production new-activations]
+        [_memory production new-activations]
         (let [activation-group (activation-group-fn production)
               previous (get activation-map activation-group)]
           (set! activation-map
@@ -792,7 +791,7 @@
 
   #?(:clj
       (pop-activation!
-        [memory]
+        [_memory]
         (when (not (.isEmpty activation-map))
           (let [entry (.firstEntry activation-map)
                 key (.getKey entry)
@@ -812,8 +811,8 @@
 
       :cljs
       (pop-activation!
-        [memory]
-        (when (not (empty? activation-map))
+        [_memory]
+        (when (seq activation-map)
           (let [[key value] (first activation-map)
                 remaining (rest value)]
 
@@ -825,17 +824,17 @@
 
   #?(:clj
       (next-activation-group
-        [memory]
+        [_memory]
         (when (not (.isEmpty activation-map))
           (let [entry (.firstEntry activation-map)]
             (.getKey entry))))
       :cljs
       (next-activation-group
-        [memory]
-        (let [[key val] (first activation-map)]
+        [_memory]
+        (let [[key _val] (first activation-map)]
           key)))
 
-  (remove-activations! [memory production to-remove]
+  (remove-activations! [_memory production to-remove]
     #?(:clj
        ;; The reasoning here is the same as remove-elements!
        (when-not (coll-empty? to-remove)
@@ -892,14 +891,14 @@
 
   #?(:clj
       (clear-activations!
-        [memory]
+        [_memory]
         (.clear activation-map))
       :cljs
       (clear-activations!
-        [memory]
+        [_memory]
         (set! activation-map (sorted-map-by activation-group-sort-fn))))
 
-  (to-persistent! [memory]
+  (to-persistent! [_memory]
     #?(:clj
        ;; Be sure to remove all transients and internal mutable
        ;; collections used in memory.  Convert any collection that is
@@ -950,71 +949,71 @@
                                   production-memory
                                   activation-map]
   IMemoryReader
-  (get-rulebase [memory] rulebase)
+  (get-rulebase [_memory] rulebase)
 
-  (get-alphas-fn [memory] alphas-fn)
+  (get-alphas-fn [_memory] alphas-fn)
 
-  (get-elements [memory node bindings]
+  (get-elements [_memory node bindings]
     (get (get alpha-memory (:id node) {})
          bindings
          []))
 
-  (get-elements-all [memory node]
+  (get-elements-all [_memory node]
     (sequence
      cat
      (vals
       (get alpha-memory (:id node) {}))))
 
-  (get-tokens [memory node bindings]
+  (get-tokens [_memory node bindings]
     (get (get beta-memory (:id node) {})
          bindings
          []))
 
-  (get-tokens-all [memory node]
+  (get-tokens-all [_memory node]
     (sequence
      cat
      (vals (get beta-memory (:id node) {}))))
 
-  (get-accum-reduced [memory node join-bindings fact-bindings]
+  (get-accum-reduced [_memory node join-bindings fact-bindings]
     ;; nil is a valid previously reduced value that can be found in the map.
     ;; Return ::no-accum-reduced instead of nil when there is no previously
     ;; reduced value in memory.
     (get (get (get accum-memory (:id node)) join-bindings) fact-bindings ::no-accum-reduced))
 
-  (get-accum-reduced-all [memory node join-bindings]
+  (get-accum-reduced-all [_memory node join-bindings]
     (get
      (get accum-memory (:id node) {})
      join-bindings))
 
-  (get-accum-reduced-complete [memory node]
+  (get-accum-reduced-complete [_memory node]
     (for [[join-binding joins] (get accum-memory (:id node) {})
           [fact-binding reduced] joins]
       {:join-bindings join-binding
        :fact-bindings fact-binding
        :result reduced}))
 
-  (get-insertions [memory node token]
+  (get-insertions [_memory node token]
     (get
      (get production-memory (:id node) {})
      token
      []))
 
-  (get-insertions-all [memory node]
+  (get-insertions-all [_memory node]
     (get production-memory (:id node) {}))
 
-  (get-activations [memory]
+  (get-activations [_memory]
     #?(:clj
        (into []
              (comp cat
                    (map (fn [^RuleOrderedActivation a]
                           (.activation a))))
              (vals activation-map))
-       
+
        :cljs
        (into [] cat (vals activation-map))))
 
   IPersistentMemory
-  (to-transient [memory]
+  (to-transient [_memory]
     #?(:clj
        (TransientLocalMemory. rulebase
                               activation-group-sort-fn

@@ -8,7 +8,6 @@
                           :refer-macros [defrule defsession defquery]])
 "
   (:require [clara.rules.engine :as eng]
-            [clara.rules.memory :as mem]
             [clara.rules.compiler :as com]
             [clara.rules.dsl :as dsl]
             [cljs.analyzer :as ana]

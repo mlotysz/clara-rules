@@ -10,7 +10,6 @@
             [clara.rules.platform :as pform]
             [schema.core :as s]
             [clojure.data.fressian :as fres]
-            [clojure.java.io :as jio]
             [clojure.main :as cm])
   (:import [clara.rules.durability
             MemIdx
@@ -18,8 +17,6 @@
            [clara.rules.memory
             RuleOrderedActivation]
            [clara.rules.engine
-            Token
-            Element
             ProductionNode
             QueryNode
             AlphaNode
@@ -93,12 +90,11 @@
    (write-with-meta w tag o (fn [^Writer w o] (.writeList w o))))
   ([^Writer w tag o write-fn]
    (let [m (meta o)]
-     (do
-       (.writeTag w tag 2)
-       (write-fn w o)
-       (if m
-         (.writeObject w m)
-         (.writeNull w))))))
+     (.writeTag w tag 2)
+     (write-fn w o)
+     (if m
+       (.writeObject w m)
+       (.writeNull w)))))
 
 (defn- read-meta [^Reader rdr]
   (some->> rdr
@@ -156,11 +152,11 @@
                       (write-record w tag o))))))
     :readers {tag-for-cached
               (reify ReadHandler
-                (read [_ rdr tag component-count]
+                (read [_ rdr _tag _component-count]
                   (d/node-id->node (.readObject rdr))))
               tag
               (reify ReadHandler
-                (read [_ rdr tag component-count]
+                (read [_ rdr _tag _component-count]
                   (-> rdr
                       read-record
                       d/cache-node)))}})
@@ -182,11 +178,11 @@
                       (write-record w tag (remove-node-expr-fn o)))))))
     :readers {tag-for-cached
               (reify ReadHandler
-                (read [_ rdr tag component-count]
+                (read [_ rdr _tag _component-count]
                   (d/node-id->node (.readObject rdr))))
               tag
               (reify ReadHandler
-                (read [_ rdr tag component-count]
+                (read [_ rdr _tag _component-count]
                   (-> rdr
                       (read-record add-node-expr-fn)
                       d/cache-node)))}}))
@@ -239,7 +235,7 @@
                 (.writeObject w (symbol (.getName ^Class c)) true)))
     :readers {"java/class"
               (reify ReadHandler
-                (read [_ rdr tag component-count]
+                (read [_ rdr _tag _component-count]
                   (resolve (.readObject rdr))))}}
 
    "clj/set"
@@ -270,14 +266,13 @@
     :writer (reify WriteHandler
               (write [_ w o]
                 (let [m (meta o)]
-                  (do
-                    (.writeTag w "clj/emptylist" 1)
-                    (if m
-                      (.writeObject w m)
-                      (.writeNull w))))))
+                  (.writeTag w "clj/emptylist" 1)
+                  (if m
+                    (.writeObject w m)
+                    (.writeNull w)))))
     :readers {"clj/emptylist"
               (reify ReadHandler
-                (read [_ rdr tag component-count]
+                (read [_ rdr _tag _component-count]
                   (let [m (read-meta rdr)]
                     (cond-> '()
                             m (with-meta m)))))}}
@@ -472,7 +467,7 @@
                 (.writeInt w (.-rule-load-order ^RuleOrderedActivation c))))
     :readers {"clara/ruleorderactivation"
               (reify ReadHandler
-                (read [_ rdr tag component-count]
+                (read [_ rdr _tag _component-count]
                   (mem/->RuleOrderedActivation (.readObject rdr)
                                                (.readObject rdr)
                                                (.readObject rdr)
@@ -487,7 +482,7 @@
                 (.writeInt w (:idx c))))
     :readers {"clara/memidx"
               (reify ReadHandler
-                (read [_ rdr tag component-count]
+                (read [_ rdr _tag _component-count]
                   (d/find-mem-idx (.readObject rdr))))}}
 
    "clara/internalmemidx"
@@ -498,7 +493,7 @@
                 (.writeInt w (:idx c))))
     :readers {"clara/internalmemidx"
               (reify ReadHandler
-                (read [_ rdr tag component-count]
+                (read [_ rdr _tag _component-count]
                   (d/find-internal-idx (.readObject rdr))))}}})
 
 (def write-handlers

@@ -1,7 +1,6 @@
 (ns clara.rules
   "Forward-chaining rules for Clojure. The primary API is in this namespace."
   (:require [clara.rules.engine :as eng]
-            [schema.core :as s]
             [clara.rules.platform :as platform]
             #?(:cljs [clara.rules.listener :as l])
             #?(:clj [clara.rules.compiler :as com])
@@ -135,7 +134,7 @@
    * An optional convert-return-fn that converts the reduced data into something useful to the caller.
      Simply uses identity by default.
     "
-  [& {:keys [initial-value reduce-fn combine-fn retract-fn convert-return-fn] :as args}]
+  [& {:as args}]
   (eng/map->Accumulator
    (merge {;; Default conversion does nothing, so use identity.
            :convert-return-fn identity}
@@ -308,7 +307,7 @@
              ;; The symbol refernces a sequence, so return it.
              (sequential? @resolved) @resolved
 
-             :default
+             :else
              (throw (ex-info (str "The source referenced by " sym " is not valid.") {:sym sym} ))))
 
          ;; The symbol is not qualified, so treat it as a namespace.
@@ -429,8 +428,8 @@ See the [query authoring documentation](http://www.clara-rules.org/docs/queries/
     (if (com/compiling-cljs?)
       `(clara.macros/defquery ~name ~@body)
       (let [doc (if (string? (first body)) (first body) nil)
-            binding (if doc (second body) (first body))
-            definition (if doc (drop 2 body) (rest body) )]
+            _binding (if doc (second body) (first body))
+            _definition (if doc (drop 2 body) (rest body) )]
         `(def ~(vary-meta name assoc :query true :doc doc)
            ~(dsl/build-query name body (meta &form)))))))
 
