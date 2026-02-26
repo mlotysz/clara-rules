@@ -1,0 +1,39 @@
+
+================================================================================
+  Clara Rules Benchmark Suite
+  N=100000  ITERS=2  Clojure 1.12.4
+================================================================================
+  ID     Scenario                                                         mean / min / max (ms)
+  --------------------------------------------------------------------------------
+
+  [01] alpha passthrough — 100k inserts, no rules                      mean=    0.5  min=    0  max=    1  ms
+  [02] alpha equality — 1% selectivity                                 mean=   93.0  min=   87  max=   99  ms
+  [03] alpha range — 50% selectivity                                   mean=  138.0  min=   95  max=  181  ms
+  [05] five independent rules — mixed fact types                       mean=  201.0  min=   93  max=  309  ms
+  [07] ten alpha nodes — equality dispatch                             mean=  134.5  min=  131  max=  138  ms
+  [09] twenty alpha nodes — even distribution                          mean=  102.0  min=   99  max=  105  ms
+  [11] hash join 1:1 — 50k×50k all match                               mean=  175.5  min=  161  max=  190  ms
+  [12] hash join 1:many — 1k customers × ~99 orders                    mean=  238.0  min=  238  max=  238  ms
+  [13] hash join sparse — 10% match rate                               mean=  126.0  min=  115  max=  137  ms
+  [14] three-way hash join — Order×Customer×Shipment                   mean=  205.5  min=  201  max=  210  ms
+  [15] two parallel hash joins — 100k total facts                      mean=  253.0  min=  245  max=  261  ms
+  [16] hash join + alpha filter on both sides                          mean=   66.0  min=   62  max=   70  ms
+  [21] negation — 100k orders, no discounts (all fire)                 mean=  107.5  min=  106  max=  109  ms
+  [22] negation — 50% blocked by discounts                             mean=20329.5  min=20177  max=20482  ms
+  [23] negation + alpha filter — 33% type, 10% flagged                 mean=  157.5  min=  152  max=  163  ms
+  [24] double negation — 100k orders, 20k flags                        mean= 3373.5  min= 3310  max= 3437  ms
+  [27] three negation rules — 100k facts, 5k flags                     mean= 1677.0  min= 1611  max= 1743  ms
+  [28] join + negation — gold customers, undiscounted orders           mean=  641.0  min=  630  max=  652  ms
+  [29] logical insert — 50k trigger, 50k inert                         mean=  205.0  min=  175  max=  235  ms
+  [30] logical retract cascade — insert 50k then retract source        mean=  145.5  min=  127  max=  164  ms
+  [31] two-level logical chain — 30k seed facts                        mean=  167.0  min=  161  max=  173  ms
+  [33] unconditional insert baseline — 50k activations                 mean=   84.5  min=   65  max=  104  ms
+  [35] truth maintenance convergence — cpu+mem two-step                mean=  211.0  min=  198  max=  224  ms
+  [36] 5-level rule chain — 20k seed facts                             mean=  262.5  min=  256  max=  269  ms
+  [37] 10-level rule chain — 10k seed facts                            mean=  288.0  min=  260  max=  316  ms
+  [38] fan-out rule — 20k activations × 5 inserts each                 mean=   91.0  min=   85  max=   97  ms
+  [39] three parallel 2-step chains — 100k total facts                 mean=  395.5  min=  377  max=  414  ms
+  [40] activation queue — 100k activations, trivial RHS                mean=   74.0  min=   72  max=   76  ms
+  [42] incremental batches — 10 × N/10 inserts with fire each          mean=   77.0  min=   75  max=   79  ms
+  [43] replace-facts — retract N/2 old, insert N/2 new                 mean=  112.0  min=   94  max=  130  ms
+  Completed 30 / 50 scenarios.

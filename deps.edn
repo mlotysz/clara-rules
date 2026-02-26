@@ -60,4 +60,13 @@
   ;; CLJS test compilation: clojure -M:cljs-test -m cljs-build [simple|advanced]
   :cljs-test
   {:extra-paths ["src/test/clojure" "src/test/clojurescript" "src/test/common"]
-   :extra-deps {org.clojure/clojurescript {:mvn/version "1.12.116"}}}}}
+   :extra-deps {org.clojure/clojurescript {:mvn/version "1.12.116"}}}
+
+  ;; Standalone benchmark suite (50 scenarios, ~100k facts)
+  ;; Usage: clojure -M:bench
+  ;;        BENCH_N=10000 clojure -M:bench          # quick smoke (10k facts)
+  ;;        BENCH_ONLY=01,11,50 clojure -M:bench    # specific scenarios
+  :bench
+  {:extra-paths ["bench"]
+   :jvm-opts ["-Xmx8g" "-server"]
+   :main-opts ["-m" "clara.bench"]}}}

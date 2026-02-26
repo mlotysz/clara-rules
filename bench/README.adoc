@@ -1,0 +1,100 @@
+= Clara Rules Benchmark Suite
+:toc:
+:toclevels: 2
+
+50 scenarios, up to 100k facts. Measures fork performance vs `com.cerner/clara-rules` oracle release.
+
+== Running
+
+[source,bash]
+----
+# Full comparison (fork vs oracle 0.24.0)
+bash bench/compare.sh
+
+# Specific scenarios only
+BENCH_ONLY=11,12,13 bash bench/compare.sh
+
+# Quick smoke test
+BENCH_N=10000 bash bench/compare.sh
+
+# Fork only (no oracle)
+clojure -M:bench
+BENCH_N=10000 BENCH_ONLY=11,12,13 clojure -M:bench
+----
+
+.Environment variables
+[cols="1,3,1"]
+|===
+| Variable | Purpose | Default
+
+| `BENCH_N` | Number of facts | 100000
+| `BENCH_ITERS` | Iterations per scenario | 2
+| `BENCH_ONLY` | Comma-separated scenario IDs to run | all
+| `ORACLE_VERSION` | Oracle JAR version | 0.24.0
+|===
+
+== Scenario Groups
+
+=== Section 1 — Alpha Network (01–10)
+Pure fact insertion and alpha filtering. Baseline for alpha dispatch throughput.
+Relevant optimizations: `DiscriminationNode`, `FusedAlphaNode`.
+
+=== Section 2 — Hash Joins (11–16)
+Cross-fact joins via equality constraints. Core pattern for most real-world rules.
+Relevant optimizations: beta sub-indexing (2.4), join unlinking (2.1).
+
+=== Section 3 — Negation (21–28)
+`:not` conditions. Common in business rules ("if no existing promo", "if not flagged").
+Relevant optimizations: `NegationWithJoinFilterNode`, join unlinking (2.1).
+
+=== Section 4 — Truth Maintenance (29–35)
+Logical inserts, cascading retractions, re-fire cycles.
+Relevant optimizations: activation queue (2.3), fire-rules loop.
+
+=== Section 5 — Rule Chains (36–43)
+Multi-level inference chains, fan-out, incremental batches.
+Relevant optimizations: activation queue (2.3), fire-rules loop.
+
+=== Section 6 — Mixed / Stress (44–50)
+Combined joins + accumulators + negation + chains. Worst-case complexity.
+
+== Accumulator Scenarios (17–20, 44–50 partial)
+
+Scenarios 17–20 (`acc/count`, `acc/sum`, `acc/all`, `acc/min`+`acc/max` per group) are *expensive by design*:
+each fact insertion during `insert-all` triggers an agenda update for its accumulator group,
+resulting in O(N) agenda churn before `fire-rules` even runs. `acc/all` (scenario 19) is worst —
+it allocates a new persistent vector per insertion, causing GC pressure at large N.
+
+These scenarios stress the accumulator pipeline but *do not represent the primary use case
+for a per-product pricing engine* (see below).
+
+== Pricing Engine Use Case
+
+For a pricing engine operating on ~100k products, prices, stock levels, and sales signals,
+the relevant patterns are:
+
+[cols="2,1,3"]
+|===
+| Pattern | Scenarios | Why relevant
+
+| Alpha dispatch (fact type + field filters) | 01–10 | Every rule starts here
+| Hash joins (product↔price, product↔stock) | 11–16 | Core per-product join pattern
+| Negation ("no active promo", "not locked") | 21–28 | Common guard conditions
+| Truth maintenance (derived price adjustments) | 29–35 | Logical insert chains
+| Rule chains (multi-step pricing logic) | 36–43 | e.g. signal→flag→adjustment
+|===
+
+*Accumulators are not a primary pattern* for per-product pricing. They appear only for
+cross-product analytics (min competitor price, avg category price, warehouse totals), which
+are typically precomputed externally and fed as facts rather than derived inline.
+
+=== Recommended benchmark subset for pricing workloads
+
+[source,bash]
+----
+BENCH_ONLY=01,02,03,05,07,09,11,12,13,14,15,16,21,22,23,24,27,28,29,30,31,33,35,36,37,38,39,40,42,43 \
+  bash bench/compare.sh
+----
+
+This covers all alpha, join, negation, truth maintenance, and chain scenarios while
+skipping the accumulator-heavy ones (17–20) that are not representative of per-product pricing logic.
