@@ -1587,13 +1587,13 @@
              "s3 res: " (vec (q-res s2)) \newline))))
 
 (deftest test-equivalent-rule-sources-caching
-  (is (instance? clojure.lang.IAtom @#'com/session-cache)
+  (is (instance? clojure.lang.IAtom com/default-session-cache)
       "Enforce that this test is revisited if the cache structure (an implementation detail) is changed.
        This test should have a clean cache but should also not impact the global cache, which
        requires resetting the cache for the duration of this test.")
 
-  (let [original-cache (-> #'com/session-cache deref deref)
-        _ (reset! @#'com/session-cache {})
+  (let [original-cache @com/default-session-cache
+        _ (swap! com/default-session-cache empty)
         s1 (mk-session [test-rule] :cache false)
         s2 (mk-session [test-rule])
         s3 (mk-session [test-rule test-rule])
@@ -1620,7 +1620,7 @@
                                   [s1 s2 s3 s4 s5 s6 s7 s8])]
     (is (= distinct-sessions
            [s1 s2 s5 s6 s8]))
-  (reset! @#'com/session-cache original-cache)))
+  (reset! com/default-session-cache original-cache)))
 
 #_{:clj-kondo/ignore [:unresolved-symbol]}
 (deftest test-try-eval-failures-includes-compile-ctx

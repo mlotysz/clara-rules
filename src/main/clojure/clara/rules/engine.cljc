@@ -2189,6 +2189,69 @@
                  get-alphas-fn
                  []))
 
+(defn- throw-unsupported-read-only-operation
+  "Throws an exception indicating that a mutating operation is not supported on a read-only session."
+  [op-name]
+  (throw #?(:clj (UnsupportedOperationException.
+                   (str op-name " is not supported on a read-only session."))
+             :cljs (js/Error.
+                     (str op-name " is not supported on a read-only session.")))))
+
+(deftype ReadOnlyLocalSession [rulebase memory transport listener get-alphas-fn]
+  ISession
+  (insert [session facts]
+    (throw-unsupported-read-only-operation "insert"))
+
+  (retract [session facts]
+    (throw-unsupported-read-only-operation "retract"))
+
+  (fire-rules [session]
+    (throw-unsupported-read-only-operation "fire-rules"))
+
+  (fire-rules [session opts]
+    (throw-unsupported-read-only-operation "fire-rules"))
+
+  (query [session query params]
+    (let [query-node (get-in rulebase [:query-nodes query])]
+      (when (= nil query-node)
+        (platform/throw-error (str "The query " query " is invalid or not included in the rule base.")))
+      (when-not (= (into #{} (keys params))
+                   (:param-keys query-node))
+        (platform/throw-error (str "The query " query " was not provided with the correct parameters, expected: "
+                                   (:param-keys query-node) ", provided: " (set (keys params)))))
+
+      (->> (mem/get-tokens memory query-node params)
+           (map (fn [{bindings :bindings}]
+                  (if (some #(re-find #"__gen" (name %)) (keys bindings))
+                    (into {} (remove (fn [[k v]] (re-find #"__gen" (name k)))
+                                     bindings))
+                    bindings))))))
+
+  (components [session]
+    {:rulebase rulebase
+     :memory memory
+     :transport transport
+     :listeners (l/flatten-listener listener)
+     :get-alphas-fn get-alphas-fn}))
+
+(defn assemble-read-only
+  "Assembles a read-only session from the given components. The resulting session supports
+   query and components but throws on insert, retract, and fire-rules."
+  [{:keys [rulebase memory transport listeners get-alphas-fn]}]
+  (ReadOnlyLocalSession. rulebase
+                         memory
+                         transport
+                         (if (> (count listeners) 0)
+                           (l/delegating-listener listeners)
+                           l/default-listener)
+                         get-alphas-fn))
+
+(defn as-read-only
+  "Returns a read-only version of the given session that supports query and components
+   but throws on insert, retract, and fire-rules."
+  [session]
+  (assemble-read-only (components session)))
+
 (defn with-listener
   "Return a new session with the listener added to the provided session,
    in addition to all listeners previously on the session."
