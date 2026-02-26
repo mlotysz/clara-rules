@@ -531,7 +531,83 @@ Multiple targeted changes to reduce allocation pressure across the engine:
 * **Eager sequence variants:** Replace lazy seqs with eager variants in `filter-accum-facts`, `pre-reduce`, `matches-some-facts?`, and `DelegatingListener` transitions
 * **Join binding order fix:** Fix `conj` argument order in `HashJoinNode`/`ExpressionJoinNode` to iterate the smaller fact-bindings map
 
-== Proposed Optimizations (Phase 3)
+=== 2.7 — Collection-Oriented Batch Joins
+
+**File:** `engine.cljc` | **Impact:** Reduced per-activation allocation in join node cross-products
+
+==== 2.7.1 — Hoisting `match-pair` to element scope
+
+In every cross-product loop, `(match-pair fact id)` previously appeared in the innermost body (token scope), allocating one `MapEntry` per `(token, element)` pair.
+Since `match-pair` depends only on `element` (not `token`), it is now computed once per element with a `:let` binding at the element loop level, saving `(T - 1)` allocations per element group.
+
+.Before (HashJoinNode.right-activate)
+[source,clojure]
+----
+(platform/eager-for [token tokens
+                     {:keys [fact bindings] :as element} elements]
+                    (->Token (conj (:matches token) (match-pair fact id))
+                             (conj (:bindings token) bindings)))
+----
+
+.After
+[source,clojure]
+----
+(platform/eager-for [{:keys [fact bindings] :as element} elements
+                     :let [mp (match-pair fact id)]
+                     token tokens]
+                    (->Token (conj (:matches token) mp)
+                             (conj (:bindings token) bindings)))
+----
+
+Applied to all four methods on `HashJoinNode` and all eight paths in `ExpressionJoinNode`.
+
+==== 2.7.2 — Single-element and single-token fast paths
+
+The dominant real-world pattern is a single-fact insert (one element) activating T tokens, or a single new token joining E elements.
+The general `eager-for` path allocates a volatile + transient vector even for this common case.
+
+Fast paths use `mapv` or `keep` (via `into []`) directly, extracting element or token fields once:
+
+.HashJoinNode.right-activate — single-element fast path
+[source,clojure]
+----
+(if (next elements)
+  ;; Multiple elements: hoist match-pair per element
+  (platform/eager-for [{:keys [fact bindings] :as element} elements
+                       :let [mp (match-pair fact id)]
+                       token tokens]
+                      (->Token (conj (:matches token) mp) ...))
+  ;; Single element: extract once, mapv over tokens
+  (let [{:keys [fact bindings]} (first elements)
+        mp (match-pair fact id)]
+    (mapv (fn [token] (->Token (conj (:matches token) mp) ...)) tokens)))
+----
+
+The `(next coll)` check is O(1) and avoids `count` allocation.
+Symmetric fast paths are applied to `left-activate`, `left-retract`, and `right-retract` on both `HashJoinNode` and `ExpressionJoinNode`.
+
+For `ExpressionJoinNode` with sub-indexing, the single-element path uses a linear scan over tokens (`= key (token-key-fn token)`) — for one element, this beats building a HashMap.
+
+==== 2.7.3 — RootJoinNode: `mapv` instead of `eager-for`
+
+`RootJoinNode` performs a 1:1 element → token transformation (no cross-product).
+The `eager-for` macro's volatile + transient overhead is unnecessary here; `mapv` is used directly in both `right-activate` and `right-retract`.
+
+==== 2.7.4 — Single-item fast path in `propagate-items-to-nodes`
+
+When only one item is being propagated, `group-by-seq` previously allocated a `LinkedHashMap` and a `JavaEqualityWrapper` wrapper even for the trivial single-group case.
+A `(next items)` guard skips `group-by-seq` entirely and calls `propagate-fn` directly:
+
+[source,clojure]
+----
+(if (next items)
+  (doseq [[join-bindings item-group] (platform/group-by-seq extract-fn items)]
+    (propagate-fn node join-bindings item-group memory transport listener))
+  (when-let [item (first items)]
+    (propagate-fn node (extract-fn item) items memory transport listener)))
+----
+
+
 
 The following optimizations have been identified but not yet implemented.
 
@@ -564,32 +640,7 @@ The PHREAK algorithm (used in Drools) instead propagates lazily — nodes only e
 * Must preserve correctness of truth maintenance under lazy evaluation
 * Negation and accumulation semantics need careful handling
 
-=== 3.2 — Collection-Oriented Batch Joins
-
-**Phase:** 3
-
-Currently, join nodes process one token or element at a time (even though the API accepts collections).
-A batch join processes sets of tokens against sets of elements in a single operation, enabling:
-
-* Vectorized hash lookups
-* Reduced per-item overhead (function call, protocol dispatch)
-* Potential for SIMD-friendly data layouts
-
-....
-  Current:
-    for token in tokens:
-      for element in elements:
-        if join-matches?(token, element):
-          emit new-token
-
-  Batch:
-    group tokens by join-key
-    group elements by join-key
-    for each shared key:
-      cross-product(token-group, element-group)
-....
-
-=== 3.3 — Incremental Truth Maintenance via Delta Propagation
+=== 3.2 — Incremental Truth Maintenance via Delta Propagation
 
 **Phase:** 3
 
@@ -657,17 +708,17 @@ Delta propagation would instead compute the _difference_ between old and new sta
 |`engine.cljc`, `memory.cljc`, `platform.cljc`
 |✓ Done
 
+|2.7
+|Collection-oriented batch joins (match-pair hoisting, single-item fast paths, RootJoinNode mapv, propagate-items-to-nodes fast path)
+|`engine.cljc`
+|✓ Done
+
 |3.1
 |Lazy/demand-driven evaluation (PHREAK)
 |`engine.cljc`, `memory.cljc`
 |Proposed
 
 |3.2
-|Collection-oriented batch joins
-|`engine.cljc`
-|Proposed
-
-|3.3
 |Incremental truth maintenance (delta propagation)
 |`engine.cljc`, `memory.cljc`
 |Proposed

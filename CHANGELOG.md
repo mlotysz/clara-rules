@@ -22,6 +22,10 @@ Fork-specific changes (based on upstream 0.24.0):
 * Fix `conj` argument order in `HashJoinNode`/`ExpressionJoinNode` `left-activate` and `left-retract` to iterate the smaller fact-bindings map
 * Use `MapEntry` instead of `PersistentVector` for `[fact node-id]` match pairs (~32 bytes vs ~96 bytes on JVM)
 * Specialize `select-keys` extraction in `propagate-items-to-nodes` for 1-2 key cases using map literals
+* Hoist `match-pair` to element-level `:let` binding in all cross-product loops (`HashJoinNode` ×4, `ExpressionJoinNode` ×8 paths), eliminating one `MapEntry` allocation per token per element
+* Add single-element fast path in `right-activate` and single-token fast path in `left-activate`/`left-retract`/`right-retract` — uses `mapv`/`keep` instead of `eager-for` for the dominant 1-fact-insert case
+* Replace `platform/eager-for` with `mapv` in `RootJoinNode` `right-activate`/`right-retract` (no cross-product needed)
+* Add single-item fast path in `propagate-items-to-nodes`: skip `group-by-seq` (LinkedHashMap + JavaEqualityWrapper) for single-item dispatch
 
 #### Accumulators
 
