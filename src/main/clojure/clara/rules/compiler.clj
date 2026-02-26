@@ -1075,16 +1075,19 @@
         ;; For join nodes, extract indexable top-level equalities from the join-filter constraints.
         ;; These can be used for sub-indexing at runtime to avoid the full cross-product.
         {:keys [sub-index-equalities join-filter-expressions]}
-        (if (and (= :join node-type)
+        (if (and (#{:join :negation} node-type)
                  join-filter-expressions)
           (let [{:keys [indexable remaining]} (extract-indexable-join-equalities
                                                (:constraints join-filter-expressions)
                                                parent-bindings)]
             (if (seq indexable)
               {:sub-index-equalities indexable
-               :join-filter-expressions (if (seq remaining)
-                                          (assoc join-filter-expressions :constraints remaining)
-                                          nil)}
+               ;; For join nodes: strip indexed equalities from join-filter-fn (no double-check needed).
+               ;; For negation nodes: keep join-filter-fn intact (ensures correctness; sub-index narrows candidates).
+               :join-filter-expressions (if (= :join node-type)
+                                          (when (seq remaining)
+                                            (assoc join-filter-expressions :constraints remaining))
+                                          join-filter-expressions)}
               {:sub-index-equalities nil
                :join-filter-expressions join-filter-expressions}))
           {:sub-index-equalities nil
@@ -1600,20 +1603,44 @@
                                                                :msg "compiling sub-index element key fn"}})]
                           prev)
                         prev)))
-            :negation (if (:join-filter-expressions beta-node)
-                        (handle-expr prev
-                                     (compile-join-filter id
-                                                          "NegationWithJoinFilterNode"
-                                                          (:join-filter-expressions beta-node)
-                                                          (:join-filter-join-bindings beta-node)
-                                                          (:new-bindings beta-node)
-                                                          (:env beta-node))
-                                     id
-                                     :join-filter-expr
-                                     {:compile-ctx {:condition condition
-                                                    :join-filter-expressions (:join-filter-expressions beta-node)
-                                                    :env (:env beta-node)
-                                                    :msg "compiling negation with join filter node"}})
+            :negation (let [has-join-filter (:join-filter-expressions beta-node)
+                            has-sub-index   (:sub-index-equalities beta-node)
+                            prev (if has-join-filter
+                                   (handle-expr prev
+                                                (compile-join-filter id
+                                                                     "NegationWithJoinFilterNode"
+                                                                     has-join-filter
+                                                                     (:join-filter-join-bindings beta-node)
+                                                                     (:new-bindings beta-node)
+                                                                     (:env beta-node))
+                                                id
+                                                :join-filter-expr
+                                                {:compile-ctx {:condition condition
+                                                               :join-filter-expressions has-join-filter
+                                                               :env (:env beta-node)
+                                                               :msg "compiling negation with join filter node"}})
+                                   prev)
+                            prev (if has-sub-index
+                                   (let [token-exprs (mapv :token-expr has-sub-index)
+                                         fact-exprs  (mapv :fact-expr  has-sub-index)
+                                         prev (handle-expr prev
+                                                           (compile-sub-index-token-key-fn
+                                                            id token-exprs
+                                                            (:join-filter-join-bindings beta-node))
+                                                           id
+                                                           :sub-index-token-key-expr
+                                                           {:compile-ctx {:condition condition
+                                                                          :msg "compiling negation sub-index token key fn"}})
+                                         prev (handle-expr prev
+                                                           (compile-sub-index-element-key-fn
+                                                            id condition fact-exprs
+                                                            (:new-bindings beta-node))
+                                                           id
+                                                           :sub-index-element-key-expr
+                                                           {:compile-ctx {:condition condition
+                                                                          :msg "compiling negation sub-index element key fn"}})]
+                                     prev)
+                                   prev)]
                         prev)
             :test (handle-expr prev
                                (compile-test id (:constraints condition) (:env beta-node))
@@ -1833,7 +1860,11 @@
           condition
           (compiled-expr-fn id :join-filter-expr)
           children
-          join-bindings)
+          join-bindings
+          (when (:sub-index-equalities beta-node)
+            (compiled-expr-fn id :sub-index-element-key-expr))
+          (when (:sub-index-equalities beta-node)
+            (compiled-expr-fn id :sub-index-token-key-expr)))
         (eng/->NegationNode
           id
           condition

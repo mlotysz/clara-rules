@@ -1341,7 +1341,7 @@
 ;; negation node is the join-filter-fn, which allows negation tests to
 ;; be applied with the parent token in context, rather than just a simple test of the non-existence
 ;; on the alpha side.
-(defrecord NegationWithJoinFilterNode [id condition join-filter-fn children binding-keys]
+(defrecord NegationWithJoinFilterNode [id condition join-filter-fn children binding-keys element-key-fn token-key-fn]
   ILeftActivate
   (left-activate [node join-bindings tokens memory transport listener]
     ;; Add token to the node's working memory for future right activations.
@@ -1353,13 +1353,22 @@
                  listener
                  children
                  (let [elements (mem/get-elements memory node join-bindings)]
-                   (platform/eager-for [token tokens
-                                        :when (not (matches-some-facts? node
-                                                                        token
-                                                                        elements
-                                                                        join-filter-fn
-                                                                        condition))]
-                                       token))))
+                   (if (and element-key-fn (seq elements))
+                     ;; Sub-indexed path: group elements by key, look up only candidates per token.
+                     (let [element-index (group-by #(element-key-fn (:fact %) (:bindings %)) elements)
+                           env (:env condition)]
+                       (filterv (fn [token]
+                                  (not (some #(join-node-matches node join-filter-fn token (:fact %) (:bindings %) env)
+                                             (get element-index (token-key-fn token) []))))
+                                tokens))
+                     ;; Original path: linear scan.
+                     (platform/eager-for [token tokens
+                                          :when (not (matches-some-facts? node
+                                                                          token
+                                                                          elements
+                                                                          join-filter-fn
+                                                                          condition))]
+                                         token)))))
 
   (left-retract [node join-bindings tokens memory transport listener]
     (l/left-retract! listener node tokens)
@@ -1372,13 +1381,22 @@
                     ;; Retract only if it previously had no matches in the negation node,
                     ;; and therefore had an activation.
                     (let [elements (mem/get-elements memory node join-bindings)]
-                      (platform/eager-for [token tokens                                  
-                                           :when (not (matches-some-facts? node
-                                                                           token
-                                                                           elements
-                                                                           join-filter-fn
-                                                                           condition))]
-                                          token))))
+                      (if (and element-key-fn (seq elements))
+                        ;; Sub-indexed path.
+                        (let [element-index (group-by #(element-key-fn (:fact %) (:bindings %)) elements)
+                              env (:env condition)]
+                          (filterv (fn [token]
+                                     (not (some #(join-node-matches node join-filter-fn token (:fact %) (:bindings %) env)
+                                                (get element-index (token-key-fn token) []))))
+                                   tokens))
+                        ;; Original path.
+                        (platform/eager-for [token tokens
+                                             :when (not (matches-some-facts? node
+                                                                             token
+                                                                             elements
+                                                                             join-filter-fn
+                                                                             condition))]
+                                            token)))))
 
   (get-join-keys [_node] binding-keys)
 
@@ -1393,24 +1411,59 @@
                       memory
                       listener
                       children
-                      (platform/eager-for [token (mem/get-tokens memory node join-bindings)
+                      (if token-key-fn
+                        ;; Sub-indexed path: for each new element find candidate tokens by key,
+                        ;; retract those that are newly blocked (matched now but not by any previous element).
+                        (let [tokens (mem/get-tokens memory node join-bindings)
+                              env (:env condition)]
+                          (if (next elements)
+                            ;; Batch: build token-index and prev-element-index once for all elements.
+                            (let [token-index       (group-by token-key-fn tokens)
+                                  prev-element-index (group-by #(element-key-fn (:fact %) (:bindings %)) previous-elements)]
+                              (into []
+                                    (comp
+                                     (mapcat (fn [{:keys [fact bindings]}]
+                                               (let [key (element-key-fn fact bindings)]
+                                                 (keep (fn [token]
+                                                         (when (join-node-matches node join-filter-fn token fact bindings env)
+                                                           token))
+                                                       (get token-index key [])))))
+                                     (distinct)
+                                     (remove (fn [token]
+                                               (some #(join-node-matches node join-filter-fn token (:fact %) (:bindings %) env)
+                                                     (get prev-element-index (token-key-fn token) [])))))
+                                    elements))
+                            ;; Single element: avoid group-by allocation — linear key-filter then join check.
+                            (let [{:keys [fact bindings]} (first elements)
+                                  key (element-key-fn fact bindings)
+                                  prev-for-key (filterv #(= (element-key-fn (:fact %) (:bindings %)) key) previous-elements)]
+                              (into []
+                                    (keep (fn [token]
+                                            (when (and (= (token-key-fn token) key)
+                                                       (join-node-matches node join-filter-fn token fact bindings env)
+                                                       (not (some #(join-node-matches node join-filter-fn token (:fact %) (:bindings %) env)
+                                                                  prev-for-key)))
+                                              token)))
+                                    tokens))))
+                        ;; Original path.
+                        (platform/eager-for [token (mem/get-tokens memory node join-bindings)
 
-                                           ;; Retract downstream if the token now has matching elements and didn't before.
-                                           ;; We check the new elements first in the expectation that the new elements will be
-                                           ;; smaller than the previous elements most of the time
-                                           ;; and that the time to check the elements will be proportional
-                                           ;; to the number of elements.
-                                           :when (and (matches-some-facts? node
-                                                                           token
-                                                                           elements
-                                                                           join-filter-fn
-                                                                           condition)
-                                                      (not (matches-some-facts? node
-                                                                                token
-                                                                                previous-elements
-                                                                                join-filter-fn
-                                                                                condition)))]
-                                          token))
+                                             ;; Retract downstream if the token now has matching elements and didn't before.
+                                             ;; We check the new elements first in the expectation that the new elements will be
+                                             ;; smaller than the previous elements most of the time
+                                             ;; and that the time to check the elements will be proportional
+                                             ;; to the number of elements.
+                                             :when (and (matches-some-facts? node
+                                                                             token
+                                                                             elements
+                                                                             join-filter-fn
+                                                                             condition)
+                                                        (not (matches-some-facts? node
+                                                                                  token
+                                                                                  previous-elements
+                                                                                  join-filter-fn
+                                                                                  condition)))]
+                                            token)))
       ;; Adding the elements will mutate the previous-elements since, on the JVM, the LocalMemory
       ;; currently returns a mutable List from get-elements after changes in issue 184.  We need to use the
       ;; new and old elements in the logic above as separate collections.  Therefore we need to delay updating the
@@ -1427,21 +1480,55 @@
                  listener
                  children
                  (let [remaining-elements (mem/get-elements memory node join-bindings)]
-                   (platform/eager-for [token (mem/get-tokens memory node join-bindings)
+                   (if token-key-fn
+                     ;; Sub-indexed path.
+                     (let [tokens (mem/get-tokens memory node join-bindings)
+                           env    (:env condition)]
+                       (if (next elements)
+                         ;; Batch: build indexes once for all retracted elements.
+                         (let [token-index             (group-by token-key-fn tokens)
+                               remaining-element-index (group-by #(element-key-fn (:fact %) (:bindings %)) remaining-elements)]
+                           (into []
+                                 (comp
+                                  (mapcat (fn [{:keys [fact bindings]}]
+                                            (let [key (element-key-fn fact bindings)]
+                                              (keep (fn [token]
+                                                      (when (join-node-matches node join-filter-fn token fact bindings env)
+                                                        token))
+                                                    (get token-index key [])))))
+                                  (distinct)
+                                  (remove (fn [token]
+                                            (some #(join-node-matches node join-filter-fn token (:fact %) (:bindings %) env)
+                                                  (get remaining-element-index (token-key-fn token) [])))))
+                                 elements))
+                         ;; Single element: avoid group-by allocation.
+                         (let [{:keys [fact bindings]} (first elements)
+                               key                     (element-key-fn fact bindings)
+                               remaining-for-key       (filterv #(= (element-key-fn (:fact %) (:bindings %)) key) remaining-elements)]
+                           (into []
+                                 (keep (fn [token]
+                                         (when (and (= (token-key-fn token) key)
+                                                    (join-node-matches node join-filter-fn token fact bindings env)
+                                                    (not (some #(join-node-matches node join-filter-fn token (:fact %) (:bindings %) env)
+                                                               remaining-for-key)))
+                                           token)))
+                                 tokens))))
+                     ;; Original path.
+                     (platform/eager-for [token (mem/get-tokens memory node join-bindings)
 
-                                        ;; Propagate tokens when some of the retracted facts joined
-                                        ;; but none of the remaining facts do.
-                                        :when (and (matches-some-facts? node
-                                                                        token
-                                                                        elements
-                                                                        join-filter-fn
-                                                                        condition)
-                                                   (not (matches-some-facts? node
-                                                                             token
-                                                                             remaining-elements
-                                                                             join-filter-fn
-                                                                             condition)))]
-                                       token))))
+                                          ;; Propagate tokens when some of the retracted facts joined
+                                          ;; but none of the remaining facts do.
+                                          :when (and (matches-some-facts? node
+                                                                          token
+                                                                          elements
+                                                                          join-filter-fn
+                                                                          condition)
+                                                     (not (matches-some-facts? node
+                                                                               token
+                                                                               remaining-elements
+                                                                               join-filter-fn
+                                                                               condition)))]
+                                         token)))))
 
   IConditionNode
   (get-condition-description [_this]
