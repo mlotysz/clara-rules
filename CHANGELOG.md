@@ -7,32 +7,21 @@ For the upstream changelog (versions 0.24.0 and earlier), see the
 
 Fork-specific changes (based on upstream 0.24.0):
 
-### Build & Dependencies
-
-* Migrate build system from Leiningen to Clojure CLI (deps.edn + tools.build)
-* Target Java 21+
-* Upgrade dependencies: Clojure 1.12.4, ClojureScript 1.12.101, Prismatic Schema 1.4.1
-* Replace Puppeteer-based CLJS tests with Node.js target
-* Fix javac compilation warnings (use `--release` flag instead of `-source`/`-target`)
-* Fix CLJS compilation warning in `testing_utils.cljc` (missing `cljs.test` require)
-* Fix clj-kondo errors for `defrule`/`defquery` docstrings in hooks
-* Remove Oracle-specific files (CONTRIBUTING.md, SECURITY.md, RELEASE.md)
-* Convert README to AsciiDoc
-
 ### Performance Optimizations
 
 #### Alpha Network
 
 * Add `FusedAlphaNode` for batched alpha dispatch — when a fact type has multiple alpha nodes, fuse them into a single per-fact-then-per-node pass with batch dispatch to beta children
+* Add `DiscriminationNode` alpha discrimination tree for hash-based dispatch on equality constraints
 * Guard `AlphaNode` listener calls with `null-listener?` to skip lazy seq allocation and protocol dispatch when no listeners are attached
 
 #### Beta Network (Join Nodes)
 
 * Add `when-let` guards on `HashJoinNode` and `ExpressionJoinNode` to skip cross-product when the opposing side (tokens or elements) is empty
+* Add beta sub-indexing for `ExpressionJoinNode`: compile-time equality extraction with runtime hash index to reduce cross-product from O(T×E) to O(T+E)
 * Fix `conj` argument order in `HashJoinNode`/`ExpressionJoinNode` `left-activate` and `left-retract` to iterate the smaller fact-bindings map
 * Use `MapEntry` instead of `PersistentVector` for `[fact node-id]` match pairs (~32 bytes vs ~96 bytes on JVM)
 * Specialize `select-keys` extraction in `propagate-items-to-nodes` for 1-2 key cases using map literals
-* Add beta sub-indexing for `ExpressionJoinNode` to reduce join cross-product from O(T×E) to O(T+E)
 
 #### Accumulators
 
@@ -55,3 +44,15 @@ Fork-specific changes (based on upstream 0.24.0):
 * Replace `OrderedUpdateCache` atom with mutable `ArrayList` (CLJ) / mutable field (CLJS) to remove CAS overhead during single-threaded fire-rules
 * Replace lazy seqs with eager variants in `filter-accum-facts`, `pre-reduce`, `matches-some-facts?`, and `DelegatingListener` transitions
 * Clean up `to-persistent!` and CLJS `get-activations` lazy seqs
+
+### Build & Infrastructure
+
+* Migrate build system from Leiningen to Clojure CLI (deps.edn + tools.build)
+* Target Java 21+
+* Upgrade dependencies: Clojure 1.12.4, ClojureScript 1.12.101, Prismatic Schema 1.4.1
+* Replace Puppeteer-based CLJS tests with Node.js target
+* Fix javac compilation warnings (use `--release` flag instead of `-source`/`-target`)
+* Fix CLJS compilation warning in `testing_utils.cljc` (missing `cljs.test` require)
+* Fix clj-kondo errors for `defrule`/`defquery` docstrings in hooks
+* Remove Oracle-specific files (CONTRIBUTING.md, SECURITY.md, RELEASE.md)
+* Convert README to AsciiDoc

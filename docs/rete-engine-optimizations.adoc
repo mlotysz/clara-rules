@@ -295,7 +295,7 @@ Sessions (`LocalSession`) are **immutable values**.
 * `insert-unconditional!` — persists regardless of rule truth.
 * Retractions cascade transitively: retracting a fact may invalidate rules, which retracts their logical insertions, which may invalidate further rules.
 
-== Implemented Optimizations (Phase 1-2)
+== Implemented Optimizations
 
 === 1.1 — `drop-one-of` Vector Optimization
 
@@ -407,6 +407,31 @@ Applied to all four methods on `HashJoinNode` (`left-activate`, `left-retract`, 
 
 This is especially impactful in sparse networks where many nodes exist but few are active simultaneously.
 
+=== 2.2 — Alpha Discrimination Tree
+
+**Files:** `compiler.clj`, `engine.cljc` | **Impact:** Hash-based dispatch for equality constraints
+
+When multiple alpha nodes share a fact type and have equality constraints on the same field with constant values, `DiscriminationNode` uses a hash map to dispatch only to matching entries instead of evaluating all N activation functions per fact.
+
+....
+  Facts of type Temperature
+              │
+              ▼
+    DiscriminationNode (field :location)
+         │ hash lookup on (:location fact)
+         │
+         ├── "kitchen" ──► AlphaNode-A (activation fn)
+         │                     │
+         │                     └─ Element → beta children
+         │
+         ├── "garage" ──► AlphaNode-B, AlphaNode-C
+         │
+         └── (no match) ──► skip, no activation calls
+....
+
+The discrimination metadata is extracted at compile time in `compiler.clj` by analyzing alpha-node activation functions for top-level equality tests on constant values.
+Falls back to `FusedAlphaNode` when discrimination metadata is absent (e.g., deserialized sessions via durability).
+
 === 2.3 — OrderedUpdateCache Mutable Collections
 
 **File:** `update_cache/core.cljc` | **Impact:** Removed atom CAS overhead in fire-rules loop
@@ -446,12 +471,47 @@ The original implementation used an `atom` with persistent vectors, incurring co
 
 This follows the precedent set by `CancellingUpdateCache`, which already used mutable Java collections.
 
+=== 2.4 — Beta Sub-Indexing for ExpressionJoinNode
+
+**Files:** `compiler.clj`, `engine.cljc` | **Impact:** Reduced cross-product from O(T×E) to O(T+E)
+
+`ExpressionJoinNode` uses a `join-filter-fn` applied to every (token, element) pair.
+When the filter contains equality sub-expressions (e.g., `(= (:id ?order) (:order-id fact))`), these are extracted at compile time and used as a hash index at runtime.
+
+....
+  Before:
+    tokens × elements → filter each pair → O(T × E)
+
+  After:
+    build index: elements grouped by extracted key → O(E)
+    for each token: lookup by key → O(T × E')
+    where E' ≪ E when key is selective
+....
+
+At compile time (`compiler.clj`), top-level equalities in the join-filter expression are identified and key-extraction functions are generated.
+At runtime, a local hash index is built from elements, and tokens look up only matching elements before applying the residual filter.
+
 === 2.5 — FusedAlphaNode for Batched Alpha Dispatch
 
-**File:** `compiler.clj`, `engine.cljc` | **Impact:** Reduced per-fact dispatch overhead for multi-node types
+**Files:** `rules.cljc`, `compiler.clj`, `engine.cljc` | **Impact:** Reduced per-fact dispatch overhead for multi-node types
 
-When a fact type has N alpha nodes, replace N independent `alpha-activate` dispatches with a single `FusedAlphaNode` that evaluates all activations in one per-fact-then-per-node pass, accumulates elements per original node, then batch-dispatches to beta children.
-Fusion is applied at `get-alphas-fn` construction time (not in `alpha-roots`) to preserve durability serialization compatibility.
+When a fact type has N alpha nodes, `FusedAlphaNode` replaces N independent `alpha-activate` dispatches with a single per-fact-then-per-node pass.
+It evaluates all activation functions in one loop, accumulates elements per original node, then batch-dispatches to beta children.
+
+....
+  Before (N alpha nodes for type T):
+    for each alpha-node:
+      alpha-activate(fact) → protocol dispatch → send-elements
+
+  After (FusedAlphaNode):
+    for each fact:
+      for each activation-fn:
+        if match → accumulate Element per target node
+    for each target node with elements:
+      batch send-elements to beta children
+....
+
+Fusion is applied at `get-alphas-fn` construction time (not stored in `alpha-roots`) to preserve durability serialization compatibility.
 Single-node types are unchanged.
 
 === 2.6 — Allocation Reduction in Engine Hot Paths
@@ -471,66 +531,9 @@ Multiple targeted changes to reduce allocation pressure across the engine:
 * **Eager sequence variants:** Replace lazy seqs with eager variants in `filter-accum-facts`, `pre-reduce`, `matches-some-facts?`, and `DelegatingListener` transitions
 * **Join binding order fix:** Fix `conj` argument order in `HashJoinNode`/`ExpressionJoinNode` to iterate the smaller fact-bindings map
 
-== Proposed Optimizations (Phase 2-3)
+== Proposed Optimizations (Phase 3)
 
 The following optimizations have been identified but not yet implemented.
-
-=== 2.2 — Alpha Discrimination Tree
-
-**Files:** `compiler.clj`, `engine.cljc` | **Phase:** 2
-
-Currently each `AlphaNode` independently evaluates its condition against every fact of the matching type.
-When many rules share overlapping conditions on the same type, this duplicates work.
-
-An **alpha discrimination tree** (also called an alpha discrimination network) shares common prefixes:
-
-....
-  Facts of type Temperature
-              │
-              ▼
-     ┌─── field :value ───┐
-     │                     │
-     ▼                     ▼
-   > 100?               > 50?
-     │                     │
-     ├── > 150?            └── AlphaNode-B
-     │     │
-     │     └── AlphaNode-C
-     │
-     └── AlphaNode-A
-....
-
-**Approach:**
-
-1. Analyze alpha-node conditions at compile time to identify shared field access patterns
-2. Build a trie where internal nodes test field values and leaves are alpha nodes
-3. Traverse the trie once per fact instead of evaluating each alpha node independently
-
-**Expected benefit:** Reduces per-fact alpha evaluation from O(N~nodes~) to O(depth~trie~). Most impactful when many rules pattern-match on the same fact type with overlapping field constraints.
-
-=== 2.4 — Beta Sub-Indexing for ExpressionJoinNode
-
-**Files:** `compiler.clj`, `engine.cljc` | **Phase:** 2
-
-`ExpressionJoinNode` uses a `join-filter-fn` that is applied to every (token, element) pair.
-When the filter contains an equality sub-expression (e.g., `(= (:id ?order) (:order-id fact))`), this equality can be extracted at compile time and used as a hash index, reducing the pairs evaluated by the filter.
-
-....
-  Current ExpressionJoinNode:
-    tokens × elements → filter each pair → O(T × E)
-
-  With sub-indexing:
-    tokens × elements[matching-key] → filter each pair → O(T × E')
-    where E' ≪ E when key is selective
-....
-
-**Approach:**
-
-1. At compile time, analyze `join-filter-fn` for extractable equality expressions
-2. Generate a compound key from these expressions
-3. Index elements by this key in alpha-memory
-4. At join time, compute the key from the token and look up only matching elements
-5. Apply the remaining non-equality portion of the filter to the reduced set
 
 === 3.1 — Lazy/Demand-Driven Evaluation (PHREAK-Inspired)
 
@@ -629,30 +632,30 @@ Delta propagation would instead compute the _difference_ between old and new sta
 |`engine.cljc`
 |✓ Done
 
+|2.2
+|Alpha discrimination tree
+|`compiler.clj`, `engine.cljc`
+|✓ Done
+
 |2.3
 |OrderedUpdateCache mutable collections
 |`update_cache/core.cljc`
 |✓ Done
 
+|2.4
+|Beta sub-indexing for ExpressionJoinNode
+|`compiler.clj`, `engine.cljc`
+|✓ Done
+
 |2.5
 |FusedAlphaNode batched alpha dispatch
-|`compiler.clj`, `engine.cljc`
+|`rules.cljc`, `compiler.clj`, `engine.cljc`
 |✓ Done
 
 |2.6
 |Allocation reduction in engine hot paths
 |`engine.cljc`, `memory.cljc`, `platform.cljc`
 |✓ Done
-
-|2.2
-|Alpha discrimination tree
-|`compiler.clj`, `engine.cljc`
-|Proposed
-
-|2.4
-|Beta sub-indexing for ExpressionJoinNode
-|`compiler.clj`, `engine.cljc`
-|Proposed
 
 |3.1
 |Lazy/demand-driven evaluation (PHREAK)
