@@ -4,8 +4,10 @@
                                          explain-activations
                                          with-full-logging
                                          without-full-logging
-                                         node-fn-name->production-name]]
-            [clara.rules :refer [insert fire-rules insert! insert-unconditional! retract query]]
+                                         node-fn-name->production-name
+                                         get-root-facts
+                                         inspect-facts]]
+            [clara.rules :refer [insert fire-rules insert! insert-unconditional! retract query as-read-only]]
             [clara.rules.accumulators :as acc]
             [schema.test :as st]
             [clojure.walk :as w]
@@ -640,3 +642,94 @@
         (is (= (ex-data exc)
                {:node-id "9001"
                 :simple-name "AN-9001-AE"}))))))
+
+;; ===== Read-only session tests =====
+
+(tu/def-rules-test test-read-only-session-queries
+  {:queries [cold-query [[] [[Cold (= ?t temperature)]]]]
+   :rules [cold-rule [[[Temperature (< temperature 20) (= ?t temperature)]]
+                       (insert! (->Cold ?t))]]
+   :sessions [empty-session [cold-query cold-rule] {:cache false}]}
+
+  (let [session (-> empty-session
+                    (insert (->Temperature 10 "MCI"))
+                    fire-rules)
+        ro-session (as-read-only session)]
+
+    (testing "query works on read-only session"
+      (is (= (query session cold-query)
+             (query ro-session cold-query))))
+
+    (testing "insert throws on read-only session"
+      (is (thrown? #?(:clj UnsupportedOperationException :cljs js/Error)
+                   (insert ro-session (->Temperature 5 "MCI")))))
+
+    (testing "retract throws on read-only session"
+      (is (thrown? #?(:clj UnsupportedOperationException :cljs js/Error)
+                   (retract ro-session (->Temperature 10 "MCI")))))
+
+    (testing "fire-rules throws on read-only session"
+      (is (thrown? #?(:clj UnsupportedOperationException :cljs js/Error)
+                   (fire-rules ro-session))))))
+
+;; ===== inspect-facts and get-root-facts tests =====
+
+(tu/def-rules-test test-get-root-facts
+  {:queries [temp-query [[] [[Temperature (= ?t temperature)]]]]
+   :rules [cold-rule [[[Temperature (< temperature 20) (= ?t temperature)]]
+                       (insert! (->Cold ?t))]]
+   :sessions [empty-session [cold-rule temp-query] {:cache false}]}
+
+  (let [t1 (->Temperature 10 "MCI")
+        t2 (->Temperature 30 "MCI")
+        session (-> empty-session
+                    (insert t1 t2)
+                    fire-rules)
+        root-facts (get-root-facts session)]
+
+    (testing "root facts include user-inserted facts that match alpha nodes"
+      (is (some #(= % t1) root-facts))
+      ;; t2 also matches the temp-query alpha node even though it doesn't trigger cold-rule
+      (is (some #(= % t2) root-facts)))
+
+    (testing "root facts exclude rule-derived facts"
+      (is (not (some #(instance? Cold %) root-facts))))))
+
+(tu/def-rules-test test-inspect-facts
+  {:rules [cold-rule [[[Temperature (< temperature 20) (= ?t temperature)]]
+                       (insert! (->Cold ?t))]]
+   :queries [cold-query [[] [[Cold (= ?t temperature)]]]]
+   :sessions [empty-session [cold-rule cold-query] {:cache false}]}
+
+  (let [t1 (->Temperature 10 "MCI")
+        session (-> empty-session
+                    (insert t1)
+                    fire-rules)
+        result (inspect-facts session)
+        facts (:facts result)
+        rules (:rules result)]
+
+    (testing "inspect-facts returns facts with type info"
+      (is (seq facts) "Should have at least one fact")
+      (is (every? #(contains? % :fact-types) facts)
+          "Every fact entry should have :fact-types"))
+
+    (testing "root facts have no :rule-id"
+      (let [temp-facts (filter #(instance? Temperature (:fact %)) facts)]
+        (is (seq temp-facts) "Should have a Temperature fact")
+        (is (every? #(not (contains? % :rule-id)) temp-facts)
+            "Root facts should not have :rule-id")))
+
+    (testing "rule-derived facts have :rule-id and :bindings"
+      (let [cold-facts (filter #(instance? Cold (:fact %)) facts)]
+        (is (seq cold-facts) "Should have a Cold fact")
+        (is (every? #(contains? % :rule-id) cold-facts)
+            "Rule-derived facts should have :rule-id")
+        (is (every? #(contains? % :bindings) cold-facts)
+            "Rule-derived facts should have :bindings")))
+
+    (testing "rules map contains producing rule"
+      (is (seq rules) "Should have at least one rule")
+      (let [cold-fact-entry (first (filter #(instance? Cold (:fact %)) facts))
+            producing-rule (get rules (:rule-id cold-fact-entry))]
+        (is (some? producing-rule) "Should find the producing rule")))))

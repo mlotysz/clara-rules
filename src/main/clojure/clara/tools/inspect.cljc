@@ -13,7 +13,9 @@
                                                  ProductionNode]])
     [clara.rules.schema :as schema]
     [clara.rules.memory :as mem]
+    [clara.rules.platform :as platform]
     [clara.tools.internal.inspect :as i]
+    [clojure.set :as set]
     #?(:cljs [goog.string :as gstr])
     #?(:clj
     [clojure.main :refer [demunge]])
@@ -26,7 +28,8 @@
               HashJoinNode
               ExpressionJoinNode
               NegationNode
-              NegationWithJoinFilterNode])))
+              NegationWithJoinFilterNode
+              ISystemFact])))
 
 (s/defschema ConditionMatch
   "A structure associating a condition with the facts that matched them.  The fields are:
@@ -305,6 +308,137 @@
         (println "  qualified because")
         (explain-activation explanation "    "))
       (println))))
+
+(defn- gen-binding?
+  "Returns true if the keyword is a generated binding (internal to Clara)."
+  [k]
+  #?(:clj (.startsWith (name k) "?__gen__")
+     :cljs (gstr/startsWith (name k) "?__gen__")))
+
+(defn- dissoc-gen-bindings
+  "Removes generated bindings from a bindings map."
+  [bindings]
+  (into {} (remove (fn [[k _]] (gen-binding? k))) bindings))
+
+(defn- system-fact?
+  "Returns true if the given fact is an internal system fact (e.g. NegationResult)."
+  [fact]
+  #?(:clj (instance? ISystemFact fact)
+     :cljs (isa? (type fact) :clara.rules.engine/system-type)))
+
+(defn get-root-facts
+  "Returns the set of root (user-inserted) facts in the session. Root facts are facts that
+   were inserted directly by the user, as opposed to facts derived by rule activations.
+   Uses identity-based deduplication to distinguish identical-value facts inserted separately."
+  [session]
+  (let [{:keys [memory rulebase]} (eng/components session)
+        {:keys [production-nodes id-to-node]} rulebase
+
+        ;; Collect all facts from alpha memory, using identity wrappers for dedup.
+        ;; Alpha memory stores Element records with :fact and :bindings fields.
+        all-fact-wrappers (into #{}
+                                (comp (mapcat (fn [[_node-id bindings-map]]
+                                                (mapcat identity (vals bindings-map))))
+                                      (map :fact)
+                                      (remove system-fact?)
+                                      (map platform/fact-id-wrap))
+                                (:alpha-memory memory))
+
+        ;; Collect all facts inserted by production nodes (rule-derived facts).
+        rule-derived-wrappers (into #{}
+                                    (comp (mapcat (fn [prod-node]
+                                                    (let [insertions-map (mem/get-insertions-all memory prod-node)]
+                                                      (mapcat (fn [[_token insertion-groups]]
+                                                                (mapcat identity insertion-groups))
+                                                              insertions-map))))
+                                          (remove system-fact?)
+                                          (map platform/fact-id-wrap))
+                                    production-nodes)]
+    (into []
+          (comp (map platform/fact-id-unwrap))
+          (set/difference all-fact-wrappers rule-derived-wrappers))))
+
+(def FactsInspectionSchema
+  "Schema for the return value of inspect-facts."
+  {:rules {s/Int schema/Rule}
+   :facts [{:fact s/Any
+            (s/optional-key :rule-id) s/Int
+            (s/optional-key :bindings) {s/Keyword s/Any}
+            :fact-types [s/Any]}]})
+
+(defn inspect-facts
+  "Returns a data structure describing all facts in the session and their provenance.
+
+   The returned map has:
+   * :rules — a map of integer IDs to production (rule) structures for rules that derived facts.
+   * :facts — a vector of maps, each with:
+     - :fact — the fact value
+     - :fact-types — vector of types this fact matches in the alpha network
+     - :rule-id (optional) — ID into the :rules map, present if this fact was derived by a rule
+     - :bindings (optional) — the bindings that caused the rule to fire, present if rule-derived
+
+   The fact-type-fn and ancestors-fn are extracted from the session's get-alphas-fn metadata
+   when available, falling back to `type` and `ancestors` respectively."
+  [session]
+  (let [{:keys [memory rulebase get-alphas-fn]} (eng/components session)
+        {:keys [production-nodes]} rulebase
+
+        ;; Extract type/ancestors functions from get-alphas-fn metadata, with fallbacks.
+        alphas-meta (meta get-alphas-fn)
+        fact-type-fn (or (:fact-type-fn alphas-meta) type)
+        ancestors-fn (or (:ancestors-fn alphas-meta) ancestors)
+
+        ;; Build a map from identity-wrapped fact -> {:rule production, :bindings bindings}
+        fact-wrapper->provenance
+        (reduce (fn [acc prod-node]
+                  (let [insertions-map (mem/get-insertions-all memory prod-node)]
+                    (reduce-kv
+                     (fn [acc token insertion-groups]
+                       (let [bindings (dissoc-gen-bindings (:bindings token))]
+                         (reduce (fn [acc insertion-group]
+                                   (reduce (fn [acc fact]
+                                             (if (system-fact? fact)
+                                               acc
+                                               (assoc acc (platform/fact-id-wrap fact)
+                                                      {:rule (:production prod-node)
+                                                       :bindings bindings})))
+                                           acc
+                                           insertion-group))
+                                 acc
+                                 insertion-groups)))
+                     acc
+                     insertions-map)))
+                {}
+                production-nodes)
+
+        ;; Collect all non-system facts from alpha memory using identity dedup.
+        ;; Alpha memory stores Element records; extract the :fact field.
+        all-facts (into []
+                        (comp (mapcat (fn [[_node-id bindings-map]]
+                                        (mapcat identity (vals bindings-map))))
+                              (map :fact)
+                              (remove system-fact?)
+                              (distinct))
+                        (:alpha-memory memory))
+
+        ;; Assign integer IDs to distinct rules that derived facts.
+        rules-set (into #{} (comp (map val) (map :rule)) fact-wrapper->provenance)
+        rule->id (into {} (map-indexed (fn [idx rule] [rule idx])) rules-set)
+        id->rule (into {} (map (fn [[rule id]] [id rule])) rule->id)]
+
+    {:rules id->rule
+     :facts (mapv (fn [fact]
+                    (let [wrapper (platform/fact-id-wrap fact)
+                          provenance (get fact-wrapper->provenance wrapper)
+                          ft (fact-type-fn fact)
+                          fact-types (into [ft] (ancestors-fn ft))
+                          base {:fact fact :fact-types fact-types}]
+                      (if provenance
+                        (assoc base
+                               :rule-id (get rule->id (:rule provenance))
+                               :bindings (:bindings provenance))
+                        base)))
+                  all-facts)}))
 
 (let [inverted-type-lookup (zipmap (vals eng/node-type->abbreviated-type)
                                    (keys eng/node-type->abbreviated-type))]

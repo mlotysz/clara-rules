@@ -4,6 +4,7 @@
    Most users should use only the clara.rules namespace."
   (:require [clara.rules.engine :as eng]
             [clara.rules.schema :as schema]
+            [clojure.core.cache.wrapped :as cache]
             [clojure.set :as set]
             [clojure.string :as string]
             [clojure.walk :as walk]
@@ -1665,10 +1666,23 @@
 (sc/defn compile-exprs :- schema/NodeFnLookup
   "Takes a map in the form produced by extract-exprs and evaluates the values(expressions) of the map in a batched manner.
    This allows the eval calls to be more effecient, rather than evaluating each expression on its own.
-   See #381 for more details."
+   See #381 for more details.
+
+   The second argument may be either an integer partition-size (for backward compatibility with
+   durability callers) or an options map with keys:
+     :forms-per-eval  - max expressions per eval batch (default 5000)
+     :compiler-cache  - atom wrapping a core.cache, or nil to disable expression caching"
   [key->expr :- schema/NodeExprLookup
-   partition-size :- sc/Int]
-  (let [batching-try-eval (fn [compilation-ctxs exprs]
+   options-or-partition-size]
+  (let [;; Backward compat: durability/fressian.clj passes an integer partition-size directly.
+        {:keys [forms-per-eval compiler-cache]}
+        (if (integer? options-or-partition-size)
+          {:forms-per-eval options-or-partition-size :compiler-cache nil}
+          options-or-partition-size)
+
+        partition-size (or forms-per-eval 5000)
+
+        batching-try-eval (fn [compilation-ctxs exprs]
                             ;; Try to evaluate all of the expressions as a batch. If they fail the batch eval then we
                             ;; try them one by one with their compilation context, this is slow but we were going to fail
                             ;; anyway.
@@ -1691,7 +1705,45 @@
                                                      "but wasn't present when evaling them individually. This likely indicates " \newline
                                                      "that the method size exceeded the maximum set by the jvm, see the cause for the actual error.")
                                                 {:compilation-ctxs compilation-ctxs}
-                                                e)))))]
+                                                e)))))
+
+        ;; When a compiler-cache is provided, check it for each expression before eval.
+        ;; The cache key is [namespace expr-form] to avoid collisions across namespaces.
+        ;; The cache may be a ConcurrentHashMap (default) or an atom wrapping a core.cache (custom).
+        cached-batching-try-eval
+        (when compiler-cache
+          (let [cache-get (if (instance? java.util.concurrent.ConcurrentHashMap compiler-cache)
+                            (fn [k] (.get ^java.util.concurrent.ConcurrentHashMap compiler-cache k))
+                            (fn [k] (cache/lookup compiler-cache k)))
+                cache-put (if (instance? java.util.concurrent.ConcurrentHashMap compiler-cache)
+                            (fn [k v] (.put ^java.util.concurrent.ConcurrentHashMap compiler-cache k v))
+                            (fn [k v] (cache/miss compiler-cache k v)))]
+            (fn [nspace compilation-ctxs exprs]
+              (let [indexed (map-indexed vector exprs)
+                    results (object-array (clojure.core/count exprs))]
+                ;; First pass: fill in any cached results.
+                (let [uncached (reduce (fn [uncached [^long idx expr]]
+                                        (let [cache-key [nspace expr]
+                                              cached-val (cache-get cache-key)]
+                                          (if (some? cached-val)
+                                            (do (aset results idx [cached-val (nth compilation-ctxs idx)])
+                                                uncached)
+                                            (conj uncached idx))))
+                                      []
+                                      indexed)]
+                  ;; Second pass: batch-eval uncached expressions.
+                  (when (seq uncached)
+                    (let [uncached-ctxs (mapv #(nth compilation-ctxs %) uncached)
+                          uncached-exprs (mapv #(nth exprs %) uncached)
+                          evaled (with-bindings (if nspace
+                                                  {#'*ns* (the-ns nspace)}
+                                                  {})
+                                   (batching-try-eval uncached-ctxs uncached-exprs))]
+                      (doseq [[i [evaled-fn _ctx]] (map vector uncached evaled)]
+                        (aset results i [evaled-fn (nth compilation-ctxs i)])
+                        ;; Cache the compiled fn keyed by [namespace expr-form].
+                        (cache-put [nspace (nth exprs i)] evaled-fn))))
+                  (vec results))))))]
     (into {}
           cat
           ;; Grouping by ns, most expressions will not have a defined ns, only expressions from production nodes.
@@ -1706,10 +1758,12 @@
                       exprs (mapv (comp first val) expr-batch)]]
             (mapv vector
                   node-expr-keys
-                  (with-bindings (if nspace
-                                   {#'*ns* (the-ns nspace)}
-                                   {})
-                    (batching-try-eval compilation-ctxs exprs)))))))
+                  (if cached-batching-try-eval
+                    (cached-batching-try-eval nspace compilation-ctxs exprs)
+                    (with-bindings (if nspace
+                                     {#'*ns* (the-ns nspace)}
+                                     {})
+                      (batching-try-eval compilation-ctxs exprs))))))))
 
 (defn safe-get
   "A helper function for retrieving a given key from the provided map. If the key doesn't exist within the map this
@@ -2047,30 +2101,33 @@
                                  (.put roots->facts roots-group (doto (java.util.LinkedList.)
                                                                   (.add fact)))))]
 
-    (fn [facts]
-      (let [roots->facts (java.util.LinkedHashMap.)]
+    (with-meta
+      (fn [facts]
+        (let [roots->facts (java.util.LinkedHashMap.)]
 
-        (doseq [fact facts
-                roots-group (fact-type->roots (wrapped-fact-type-fn fact))]
-          (update-roots->facts! roots->facts roots-group fact))
+          (doseq [fact facts
+                  roots-group (fact-type->roots (wrapped-fact-type-fn fact))]
+            (update-roots->facts! roots->facts roots-group fact))
 
-        (let [return-list (java.util.LinkedList.)
-              entries (.entrySet roots->facts)
-              entries-it (.iterator entries)]
-          ;; We iterate over the LinkedHashMap manually to avoid potential issues described at http://dev.clojure.org/jira/browse/CLJ-1738
-          ;; where a Java iterator can return the same entry object repeatedly and mutate it after each next() call.  We use mutable lists
-          ;; for performance but wrap them in unmodifiableList to make it clear that the caller is not expected to mutate these lists.
-          ;; Since after this function returns the only reference to the fact lists will be through the unmodifiedList we can depend elsewhere
-          ;; on these lists not changing.  Since the only expected workflow with these lists is to loop through them, not add or remove elements,
-          ;; we don't gain much from using a transient (which can be efficiently converted to a persistent data structure) rather than a mutable type.
-          (loop []
-            (when (.hasNext entries-it)
-              (let [^java.util.Map$Entry e (.next entries-it)]
-                (.add return-list [(-> e ^AlphaRootsWrapper (.getKey) .roots)
-                                   (java.util.Collections/unmodifiableList (.getValue e))])
-                (recur))))
+          (let [return-list (java.util.LinkedList.)
+                entries (.entrySet roots->facts)
+                entries-it (.iterator entries)]
+            ;; We iterate over the LinkedHashMap manually to avoid potential issues described at http://dev.clojure.org/jira/browse/CLJ-1738
+            ;; where a Java iterator can return the same entry object repeatedly and mutate it after each next() call.  We use mutable lists
+            ;; for performance but wrap them in unmodifiableList to make it clear that the caller is not expected to mutate these lists.
+            ;; Since after this function returns the only reference to the fact lists will be through the unmodifiedList we can depend elsewhere
+            ;; on these lists not changing.  Since the only expected workflow with these lists is to loop through them, not add or remove elements,
+            ;; we don't gain much from using a transient (which can be efficiently converted to a persistent data structure) rather than a mutable type.
+            (loop []
+              (when (.hasNext entries-it)
+                (let [^java.util.Map$Entry e (.next entries-it)]
+                  (.add return-list [(-> e ^AlphaRootsWrapper (.getKey) .roots)
+                                     (java.util.Collections/unmodifiableList (.getValue e))])
+                  (recur))))
 
-          (java.util.Collections/unmodifiableList return-list))))))
+            (java.util.Collections/unmodifiableList return-list))))
+      {:fact-type-fn wrapped-fact-type-fn
+       :ancestors-fn wrapped-ancestors-fn})))
 
 
 (sc/defn build-network
@@ -2137,8 +2194,11 @@
       :get-alphas-fn get-alphas-fn
       :node-expr-fn-lookup expr-fn-lookup})))
 
-;; Cache of sessions for fast reloading.
-(def ^:private session-cache (atom {}))
+;; LRU cache of sessions for fast reloading. Uses defonce to survive REPL reloads.
+(defonce default-session-cache (cache/lru-cache-factory {} :threshold 64))
+
+;; Cache for compiled expressions. Uses a ConcurrentHashMap for thread-safe, lock-free access.
+(defonce default-compiler-cache (java.util.concurrent.ConcurrentHashMap.))
 
 (defn clear-session-cache!
   "Clears the cache of reusable Clara sessions, so any subsequent sessions
@@ -2146,7 +2206,14 @@
    by tooling or specialized needs; most users can simply specify the :cache false
    option when creating sessions."
   []
-  (reset! session-cache {}))
+  (swap! default-session-cache empty))
+
+(defn clear-compiler-cache!
+  "Clears the cache of compiled expressions, so any subsequent session compilations
+   will re-evaluate all expressions. This is intended for use by tooling or specialized
+   needs; most users will not need to call this."
+  []
+  (.clear ^java.util.concurrent.ConcurrentHashMap default-compiler-cache))
 
 (defn production-load-order-comp [a b]
   (< (-> a meta ::rule-load-order)
@@ -2235,7 +2302,18 @@
 
         ;; Extract the expressions from the graphs and evaluate them in a batch manner.
         ;; This is a performance optimization, see Issue 381 for more information.
-        exprs (compile-exprs (extract-exprs beta-graph alpha-graph) forms-per-eval)
+        compiler-cache (let [cc (:compiler-cache options)]
+                         (cond
+                           ;; Compiler caching is opt-in. Expression forms include unique node IDs,
+                           ;; so cache hits across different sessions are rare. Users who compile
+                           ;; many sessions with overlapping rules may benefit from enabling this.
+                           (false? cc) nil
+                           (nil? cc) nil
+                           (true? cc) default-compiler-cache
+                           :else cc))
+        exprs (compile-exprs (extract-exprs beta-graph alpha-graph)
+                             {:forms-per-eval forms-per-eval
+                              :compiler-cache compiler-cache})
 
         ;; If we have made it to this point, it means that we have succeeded in compiling all expressions
         ;; thus we can free the :compile-ctx used for troubleshooting compilation failures.
@@ -2317,13 +2395,20 @@
                                   (transient #{}))
                           persistent!)]
 
-     (if-let [session (get @session-cache [productions options])]
-       session
-       (let [session (mk-session* productions options)]
+     (let [cache-opt (get options :cache true)
+           session-cache-atom (cond
+                                (false? cache-opt) nil
+                                (true? cache-opt) default-session-cache
+                                (nil? cache-opt) default-session-cache
+                                ;; A custom atom can be provided as the :cache value.
+                                :else cache-opt)
+           ;; Use hash-based key to avoid holding strong references to productions in the cache key.
+           ;; Dissoc cache-related options since they don't affect session compilation output.
+           cache-key (when session-cache-atom
+                       [(hash productions)
+                        (hash (dissoc options :cache :compiler-cache))])]
 
-         ;; Cache the session unless instructed not to.
-         (when (get options :cache true)
-           (swap! session-cache assoc [productions options] session))
-
-         ;; Return the session.
-         session)))))
+       (if session-cache-atom
+         (cache/lookup-or-miss session-cache-atom cache-key
+                               (fn [_] (mk-session* productions options)))
+         (mk-session* productions options))))))

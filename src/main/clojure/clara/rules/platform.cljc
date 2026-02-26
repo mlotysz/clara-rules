@@ -109,6 +109,37 @@
              ~@(for [[tl] binding-pairs]
                  `(.remove ~tl)))))))
 
+;; A wrapper for identity-based deduplication of facts in inspection tools.
+;; Uses object identity (identical?) rather than value equality for comparison.
+#?(:clj
+   (deftype FactIdentityWrapper [wrapped ^int id-hash]
+     Object
+     (equals [this other]
+       (and (instance? FactIdentityWrapper other)
+            (identical? wrapped (.wrapped ^FactIdentityWrapper other))))
+     (hashCode [this]
+       id-hash))
+   :cljs
+   (deftype FactIdentityWrapper [wrapped]
+     IEquiv
+     (-equiv [this other]
+       (and (instance? FactIdentityWrapper other)
+            (identical? wrapped (.-wrapped other))))
+     IHash
+     (-hash [this]
+       (hash wrapped))))
+
+(defn fact-id-wrap
+  "Wraps a fact for identity-based deduplication."
+  [fact]
+  #?(:clj (FactIdentityWrapper. fact (System/identityHashCode fact))
+     :cljs (FactIdentityWrapper. fact)))
+
+(defn fact-id-unwrap
+  "Unwraps a FactIdentityWrapper to get the original fact."
+  [^FactIdentityWrapper wrapper]
+  (.-wrapped wrapper))
+
 (defmacro eager-for
   "An eager version of for that returns a persistent vector.
    Uses doseq+transient internally to avoid lazy seq allocation.

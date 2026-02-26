@@ -44,6 +44,13 @@
   ([session] (eng/fire-rules session {}))
   ([session opts] (eng/fire-rules session opts)))
 
+(defn as-read-only
+  "Returns a read-only version of the given session. The returned session supports
+   query and components but throws on insert, retract, and fire-rules. This is useful
+   for sharing sessions for query-only access."
+  [session]
+  (eng/as-read-only session))
+
 (defn query
   "Runs the given query with the optional given parameters against the session.
    The optional parameters should be in map form. For example, a query call might be:
@@ -163,32 +170,35 @@
                                    ;; we may need to define a custom hierarchy for them.
                                    #{}
                                    (ancestors-fn fact-type)))]
-      (fn [facts]
-        (for [[fact-type facts] (platform/tuned-group-by wrapped-fact-type-fn facts)]
+      (with-meta
+        (fn [facts]
+          (for [[fact-type facts] (platform/tuned-group-by wrapped-fact-type-fn facts)]
 
-          (if-let [alpha-nodes (get @alpha-map fact-type)]
+            (if-let [alpha-nodes (get @alpha-map fact-type)]
 
-            ;; If the matching alpha nodes are cached, simply return them.
-            [alpha-nodes facts]
+              ;; If the matching alpha nodes are cached, simply return them.
+              [alpha-nodes facts]
 
-            ;; The alpha nodes weren't cached for the type, so get them now.
-            (let [ancestors (conj (wrapped-ancestors-fn fact-type) fact-type)
+              ;; The alpha nodes weren't cached for the type, so get them now.
+              (let [ancestors (conj (wrapped-ancestors-fn fact-type) fact-type)
 
-                  ;; Get all alpha nodes for all ancestors, then fuse multi-node groups.
-                  new-nodes (eng/fuse-alpha-nodes
-                             fused-id-fn
-                             (into []
-                                   (distinct)
-                                   (reduce
-                                    (fn [coll ancestor]
-                                      (concat
-                                       coll
-                                       (get-in merged-rules [:alpha-roots ancestor])))
-                                    []
-                                    ancestors)))]
+                    ;; Get all alpha nodes for all ancestors, then fuse multi-node groups.
+                    new-nodes (eng/fuse-alpha-nodes
+                               fused-id-fn
+                               (into []
+                                     (distinct)
+                                     (reduce
+                                      (fn [coll ancestor]
+                                        (concat
+                                         coll
+                                         (get-in merged-rules [:alpha-roots ancestor])))
+                                      []
+                                      ancestors)))]
 
-              (swap! alpha-map assoc fact-type new-nodes)
-              [new-nodes facts])))))))
+                (swap! alpha-map assoc fact-type new-nodes)
+                [new-nodes facts]))))
+        {:fact-type-fn wrapped-fact-type-fn
+         :ancestors-fn wrapped-ancestors-fn}))))
 
 #?(:cljs
   (defn- mk-rulebase
@@ -343,6 +353,10 @@
       * :forms-per-eval - The maximum number of expressions that will be evaluated per call to eval.
         Larger batch sizes should see better performance compared to smaller batch sizes. (Only applicable to Clojure)
         Defaults to 5000, see clara.rules.compiler/forms-per-eval-default for more information.
+      * :compiler-cache - Controls caching of compiled expressions across sessions.
+        Defaults to true (uses the shared default-compiler-cache). Set to false to disable, or provide a custom
+        atom wrapping a core.cache implementation. Expression caching avoids redundant eval calls when
+        the same rule expressions appear across multiple sessions.
       * :omit-compile-ctx - When false Clara, in Clojure, retains additional information to improve error messages during
         session deserialization at the cost of additional memory use.
         By default this information is retained until the session is initially compiled and then will be discarded. This

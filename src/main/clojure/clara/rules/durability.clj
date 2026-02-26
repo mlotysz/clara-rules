@@ -494,32 +494,34 @@
    Note!  Currently this only supports the clara.rules.memory.PersistentLocalMemory implementation
           of memory."
   ([rulebase opts]
-   (let [{:keys [listeners transport]} opts]
-     
-     (eng/assemble {:rulebase rulebase
-                    :memory (eng/local-memory rulebase
-                                              (clara.rules.engine.LocalTransport.)
-                                              (:activation-group-sort-fn rulebase)
-                                              (:activation-group-fn rulebase)
-                                              ;; TODO: Memory doesn't seem to ever need this or use
-                                              ;; it.  Can we just remove it from memory?
-                                              (:get-alphas-fn rulebase))
-                    :transport (or transport (clara.rules.engine.LocalTransport.))
-                    :listeners (or listeners [])
-                    :get-alphas-fn (:get-alphas-fn rulebase)})))
+   (let [{:keys [listeners transport read-only?]} opts
+         assemble-fn (if read-only? eng/assemble-read-only eng/assemble)]
+
+     (assemble-fn {:rulebase rulebase
+                   :memory (eng/local-memory rulebase
+                                             (clara.rules.engine.LocalTransport.)
+                                             (:activation-group-sort-fn rulebase)
+                                             (:activation-group-fn rulebase)
+                                             ;; TODO: Memory doesn't seem to ever need this or use
+                                             ;; it.  Can we just remove it from memory?
+                                             (:get-alphas-fn rulebase))
+                   :transport (or transport (clara.rules.engine.LocalTransport.))
+                   :listeners (or listeners [])
+                   :get-alphas-fn (:get-alphas-fn rulebase)})))
 
   ([rulebase memory opts]
-   (let [{:keys [listeners transport]} opts]
-     
-     (eng/assemble {:rulebase rulebase
-                    :memory (assoc memory
-                                   :rulebase rulebase
-                                   :activation-group-sort-fn (:activation-group-sort-fn rulebase)
-                                   :activation-group-fn (:activation-group-fn rulebase)
-                                   :alphas-fn (:get-alphas-fn rulebase))
-                    :transport (or transport (clara.rules.engine.LocalTransport.))
-                    :listeners (or listeners [])
-                    :get-alphas-fn (:get-alphas-fn rulebase)}))))
+   (let [{:keys [listeners transport read-only?]} opts
+         assemble-fn (if read-only? eng/assemble-read-only eng/assemble)]
+
+     (assemble-fn {:rulebase rulebase
+                   :memory (assoc memory
+                                  :rulebase rulebase
+                                  :activation-group-sort-fn (:activation-group-sort-fn rulebase)
+                                  :activation-group-fn (:activation-group-fn rulebase)
+                                  :alphas-fn (:get-alphas-fn rulebase))
+                   :transport (or transport (clara.rules.engine.LocalTransport.))
+                   :listeners (or listeners [])
+                   :get-alphas-fn (:get-alphas-fn rulebase)}))))
 
 (defn rulebase->rulebase-with-opts
   "Intended for use in rulebase deserialization implementations where these functions were stripped
