@@ -1,0 +1,523 @@
+= PHREAK: Lazy Evaluation & Delta Propagation for Clara Rules
+:toc: left
+:toclevels: 3
+:icons: font
+:source-highlighter: rouge
+
+== Background
+
+=== What Is PHREAK?
+
+PHREAK (**P**ropagation, **H**ibernate, **R**eactive, **EA**ger, **K**nowledge) is a rule evaluation strategy created by Mark Proctor for the Drools rules engine (Red Hat, circa 2012-2013).
+It replaced Drools' earlier Rete and ReteOO implementations.
+
+The core insight: classic Rete is **eager** -- every fact insertion or retraction immediately propagates through the entire network, all the way to terminal nodes.
+PHREAK is **lazy** -- it marks paths as dirty and defers actual computation until results are demanded by `fire-rules`.
+
+=== Why PHREAK for Clara?
+
+Clara's current model is textbook eager Rete.
+Every `right-activate`/`left-activate` call cascades synchronously through the full downstream subgraph before returning.
+After completing Phases 1 and 2 of micro-optimizations (allocation reduction, hash indexing, alpha discrimination trees), the eager propagation model itself is the dominant remaining bottleneck.
+
+Workloads that benefit most:
+
+* Sessions with many rules but few active at any time (sparse activation)
+* High-churn scenarios where facts are inserted and retracted frequently
+* Rules with deep join chains where intermediate results are discarded
+
+=== Relationship to Phase 3 Optimizations
+
+PHREAK combines two proposed optimizations into a single coherent architecture:
+
+[cols="1,2,2"]
+|===
+|ID |Optimization |Role in PHREAK
+
+|3.1
+|Lazy/demand-driven evaluation
+|The **pull model** -- defer propagation, mark dirty, evaluate on demand
+
+|3.3
+|Incremental truth maintenance (delta propagation)
+|The **delta model** -- propagate only changes, not full re-derivation
+|===
+
+These are tightly coupled: PHREAK's lazy evaluation naturally uses delta propagation.
+The pending delta queue per node IS the deferred work that the pull phase evaluates.
+Implementing them together means one refactor of the core engine instead of two overlapping rewrites.
+
+3.2 (collection-oriented batch joins) is **orthogonal** and can be implemented before or after PHREAK.
+Under PHREAK, batch joins operate on accumulated deltas during the pull phase -- a natural fit.
+
+== Current Architecture: Eager Rete
+
+=== Propagation Flow
+
+....
+  insert(fact)
+      |
+      v
+  alpha-activate (immediate)
+      |
+      v
+  right-activate on beta node (immediate)
+      |
+      +---> store element in alpha-memory
+      +---> lookup tokens from beta-memory
+      +---> compute cross-product (immediate)
+      +---> send-tokens to children (immediate)
+              |
+              v
+           cascades synchronously through
+           ALL downstream nodes before returning
+              |
+              v
+  ProductionNode: create Activation record
+....
+
+Every call to `right-activate` or `left-activate` triggers a synchronous cascade through the entire downstream subgraph.
+The only batching points are the `OrderedUpdateCache` (between salience groups) and `*pending-external-retractions*` (for cascading retractions).
+
+=== Key Interfaces
+
+[source,clojure]
+----
+;; Beta node activation -- currently eager and synchronous
+(defprotocol ILeftActivate
+  (left-activate [node join-bindings tokens memory transport listener])
+  (left-retract  [node join-bindings tokens memory transport listener]))
+
+(defprotocol IRightActivate
+  (right-activate [node join-bindings elements memory transport listener])
+  (right-retract  [node join-bindings elements memory transport listener]))
+
+;; Transport -- currently push-based
+(defprotocol ITransport
+  (send-elements [transport memory listener nodes elements])
+  (send-tokens   [transport memory listener nodes tokens]))
+----
+
+=== fire-rules* Loop (Current)
+
+....
+  fire-rules*(memory, nodes, transport, listener)
+      |
+      v
+  loop:
+      |
+      +-- pop-activation! (highest priority group)
+      |       |
+      |       v
+      |   execute rule RHS
+      |       |
+      |       +-- flush-insertions! (logical/unconditional)
+      |       +-- flush-rhs-retractions!
+      |       |       |
+      |       |       v
+      |       |   propagate through network (EAGER -- cascades now)
+      |       |       |
+      |       |       v
+      |       |   may create new activations
+      |       |
+      |       v
+      +-- on group transition: flush-updates
+      |       |
+      |       v
+      |   drain OrderedUpdateCache
+      |   propagate batched alpha inserts/retracts (EAGER)
+      |
+      +-- no activations left?
+              |
+              +-- flush-updates --> new activations? --> loop
+              +-- no --> done, to-persistent!(memory)
+....
+
+== Proposed Architecture: PHREAK
+
+=== High-Level Model
+
+....
+  insert(fact)                             fire-rules()
+      |                                        |
+      v                                        v
+  alpha-activate                          for each production node:
+      |                                        |
+      v                                        v
+  store delta at entry node              is path dirty?
+  mark path DIRTY                        +-- no  --> skip
+      |                                  +-- yes --> pull(node)
+      v                                               |
+  RETURN (no cascade)                                 v
+                                         walk ancestors, evaluate
+                                         pending deltas lazily
+                                               |
+                                               v
+                                         compute new activations
+                                         from delta results only
+....
+
+=== Core Concepts
+
+==== Segments
+
+The beta network is divided into **segments** -- chains of nodes between branch points.
+A segment is the unit of dirty tracking.
+
+....
+  AlphaNode-A ----+
+                  |
+                  v
+             [Segment 1]
+              RootJoinNode --> HashJoinNode --> TestNode
+                                                  |
+                                  +---------------+---------------+
+                                  |                               |
+                             [Segment 2]                     [Segment 3]
+                              AccumNode --> ProdNode-A        NegNode --> ProdNode-B
+....
+
+Each segment maintains:
+
+* A **dirty flag** -- set when new deltas arrive, cleared after evaluation
+* A **delta queue** -- pending insertions and retractions that have not yet been processed
+
+==== Deltas
+
+A delta represents a pending change at a node:
+
+[source,clojure]
+----
+;; A pending change queued at a node
+(defrecord Delta [type      ;; :insert | :retract
+                  items])   ;; elements (from alpha) or tokens (from beta)
+----
+
+Deltas replace the current model where changes are immediately materialized into memory and propagated.
+Under PHREAK, deltas accumulate until the pull phase processes them.
+
+==== Pull Evaluation
+
+When `fire-rules` is called, the engine evaluates dirty paths top-down:
+
+....
+  pull(ProductionNode)
+      |
+      v
+  is parent segment dirty?
+      |
+      +-- no  --> no new activations
+      +-- yes --> pull(parent-segment)
+                      |
+                      v
+                  for each node in segment:
+                      |
+                      v
+                  drain delta queue
+                  compute join results (using deltas only)
+                  propagate delta results to next node
+                      |
+                      v
+                  clear dirty flag
+                  emit delta tokens to child segment
+....
+
+=== Modified Interfaces
+
+==== Split Activation Protocol
+
+The current `ILeftActivate`/`IRightActivate` protocols are split into **receive** (queue delta) and **evaluate** (process deltas):
+
+[source,clojure]
+----
+;; Phase 1: Receive -- called during insert/retract, marks dirty
+(defprotocol IDeltaReceive
+  (receive-elements [node join-bindings elements delta-memory])
+  (receive-tokens   [node join-bindings tokens delta-memory])
+  (receive-element-retractions [node join-bindings elements delta-memory])
+  (receive-token-retractions   [node join-bindings tokens delta-memory]))
+
+;; Phase 2: Evaluate -- called during pull, processes queued deltas
+(defprotocol IDeltaEvaluate
+  (evaluate [node memory delta-memory transport listener]))
+----
+
+`receive-*` methods are lightweight: they append to the delta queue and set the dirty flag.
+No cross-products, no downstream propagation.
+
+`evaluate` drains the delta queue, computes join results against materialized memory, updates memory, and emits delta results downstream.
+
+==== Pull-Based Transport
+
+[source,clojure]
+----
+;; Transport becomes delta-aware
+(defprotocol IDeltaTransport
+  (send-delta-elements [transport delta-memory nodes elements])
+  (send-delta-tokens   [transport delta-memory nodes tokens])
+  (send-delta-element-retractions [transport delta-memory nodes elements])
+  (send-delta-token-retractions   [transport delta-memory nodes tokens]))
+----
+
+Delta transport queues items into the receiving node's delta queue rather than triggering immediate evaluation.
+
+=== Node Evaluation Strategies
+
+==== Join Nodes (HashJoinNode, ExpressionJoinNode, RootJoinNode)
+
+....
+  evaluate(HashJoinNode):
+      |
+      v
+  drain delta queue: new-elements, retracted-elements, new-tokens, retracted-tokens
+      |
+      +--> process retractions first:
+      |        remove from materialized memory
+      |        compute retracted cross-products --> emit as retraction deltas
+      |
+      +--> process insertions:
+      |        add to materialized memory
+      |        compute cross-products against existing + new --> emit as insertion deltas
+      |
+      v
+  clear dirty flag
+....
+
+The key optimization: only the **delta** (new/retracted items) participates in the cross-product, not the full materialized set.
+New elements join against all existing tokens.
+New tokens join against all existing elements.
+But existing tokens are NOT re-joined against existing elements -- that work was already done.
+
+==== Negation Nodes
+
+Negation nodes track the **transition** between "has matches" and "no matches" for each token:
+
+....
+  evaluate(NegationNode):
+      |
+      v
+  drain delta queue
+      |
+      +--> new elements arrived:
+      |        for tokens that previously had NO matches:
+      |            if now has matches --> emit token retraction delta
+      |
+      +--> elements retracted:
+      |        for tokens that previously HAD matches:
+      |            if now has NO matches --> emit token insertion delta
+      |
+      v
+  Optimization: maintain a match-count per token
+  instead of re-querying mem/get-elements each time
+....
+
+Under PHREAK, the match-count can be maintained incrementally as elements arrive/depart, avoiding the current `matches-some-facts?` scan.
+
+==== Accumulator Nodes
+
+Accumulators are the most complex case.
+Delta propagation requires incremental accumulation:
+
+....
+  evaluate(AccumulateNode):
+      |
+      v
+  drain delta queue: new-elements, retracted-elements
+      |
+      +--> has retract-fn?
+      |        yes --> incrementally update:
+      |                  new-result = reduce(reduce-fn, old-result, new-elements)
+      |                  new-result = reduce(retract-fn, new-result, retracted-elements)
+      |
+      |        no  --> full re-accumulation:
+      |                  new-result = do-accumulate(all-elements)
+      |                  (fallback, same as current behavior)
+      |
+      +--> compare old-result vs new-result:
+      |        changed   --> emit delta token with new binding
+      |        unchanged --> skip (no downstream propagation)
+      |
+      v
+  This is where PHREAK shines: if 1 of 1000 elements changes
+  but the accumulated result is the same, NO downstream work occurs
+....
+
+The `retract-fn` field on accumulators becomes critical for performance under PHREAK.
+Built-in accumulators (`sum`, `count`, `min`, `max`) already support it.
+User-defined accumulators without `retract-fn` fall back to full re-accumulation.
+
+==== Production Nodes
+
+Production nodes are the pull roots:
+
+....
+  evaluate(ProductionNode):
+      |
+      v
+  drain delta queue: new-tokens, retracted-tokens
+      |
+      +--> retracted tokens:
+      |        remove activations (mem/remove-activations!)
+      |        retract logical insertions (mem/remove-insertions!)
+      |        queue retracted facts into delta transport
+      |
+      +--> new tokens:
+      |        create Activation records
+      |        add to priority queue (mem/add-activations!)
+      |
+      v
+  Truth maintenance retractions re-enter the network
+  as new deltas, which will be processed in the next pull cycle
+....
+
+=== Modified fire-rules* Loop
+
+....
+  fire-rules*(memory, delta-memory, nodes, transport, listener)
+      |
+      v
+  1. Process pending external operations
+     (insert/retract from user code)
+     --> alpha-activate --> receive-* on entry nodes --> mark dirty
+      |
+      v
+  2. Pull phase: evaluate dirty paths
+     for each production/query node:
+         if path is dirty:
+             evaluate ancestors top-down (recursive pull)
+             evaluate production node --> new activations
+      |
+      v
+  3. Fire phase: execute activations
+     loop:
+         pop-activation! (highest priority)
+         execute rule RHS
+         RHS insertions/retractions --> receive-* on entry nodes --> mark dirty
+         |
+         +-- after each activation (or on group transition):
+         |       re-pull dirty paths --> may produce new activations
+         |
+         +-- no activations and no dirty paths --> done
+      |
+      v
+  4. to-persistent!(memory, delta-memory)
+....
+
+=== Memory Model Changes
+
+==== Delta Memory
+
+A new `DeltaMemory` structure sits alongside `TransientLocalMemory`:
+
+....
+  TransientLocalMemory (existing -- materialized state)
+  +-- alpha-memory:      {node-id -> {bindings -> [Element ...]}}
+  +-- beta-memory:       {node-id -> {bindings -> [Token ...]}}
+  +-- accum-memory:      {node-id -> {join-bindings -> {fact-bindings -> result}}}
+  +-- production-memory: {node-id -> {token -> [inserted-facts]}}
+  +-- activation-map:    {group-key -> PriorityQueue<Activation>}
+
+  DeltaMemory (new -- pending changes)
+  +-- element-deltas:    {node-id -> {bindings -> {:insert [Element ...], :retract [Element ...]}}}
+  +-- token-deltas:      {node-id -> {bindings -> {:insert [Token ...], :retract [Token ...]}}}
+  +-- dirty-segments:    #{segment-id ...}
+  +-- negation-counts:   {node-id -> {token -> match-count}}   ;; incremental negation
+....
+
+Materialized memory is updated **during evaluate**, not during receive.
+This ensures that queries against materialized memory always see a consistent state.
+
+==== Persistent Delta Memory
+
+Between `fire-rules` calls, delta memory is converted to a persistent form (like `PersistentLocalMemory`).
+External `insert`/`retract` operations queue deltas into the persistent delta memory, which is converted to transient at the start of the next `fire-rules`.
+
+== Implementation Plan
+
+=== Phase A: Infrastructure
+
+. Define `DeltaMemory` protocol and transient/persistent implementations
+. Define `IDeltaReceive` and `IDeltaEvaluate` protocols
+. Define `IDeltaTransport` protocol
+. Implement segment identification and dirty tracking
+. Add `delta-memory` field to `LocalSession`
+
+=== Phase B: Node Migration
+
+Migrate nodes one at a time, maintaining backward compatibility through the transition:
+
+. `RootJoinNode` -- simplest join node, proves the pattern
+. `HashJoinNode` -- most common join node
+. `ExpressionJoinNode` -- join with filter + sub-indexing
+. `TestNode` -- stateless, straightforward
+. `NegationNode` / `NegationWithJoinFilterNode` -- add match-count tracking
+. `AccumulateNode` / `AccumulateWithJoinFilterNode` -- incremental accumulation
+. `ProductionNode` / `QueryNode` -- terminal nodes, pull roots
+
+=== Phase C: fire-rules Integration
+
+. Implement pull-phase traversal (evaluate dirty paths top-down)
+. Modify `fire-rules*` loop to interleave pull and fire phases
+. Migrate truth maintenance to delta-based retraction cascading
+. Remove eager `ITransport` usage, switch to `IDeltaTransport`
+
+=== Phase D: Cleanup & Optimization
+
+. Remove legacy eager code paths
+. Optimize delta queue data structures (ArrayList on CLJ, array on CLJS)
+. Tune pull ordering (evaluate highest-priority production paths first)
+. Benchmark and profile against Phase 2 baseline
+
+== Correctness Considerations
+
+=== Truth Maintenance
+
+Logical insertions under PHREAK must maintain the invariant: a logically inserted fact exists if and only if the rule that inserted it has at least one valid activation.
+
+Under eager Rete, this is guaranteed by synchronous cascade -- retracting a supporting fact immediately cascades through to retract the logical insertion.
+Under PHREAK, the cascade is deferred.
+The invariant is maintained by ensuring that the pull phase processes **all** dirty paths before `fire-rules` returns -- no dirty segments are left unresolved.
+
+=== Negation Correctness
+
+Negation nodes must not emit spurious tokens during partial evaluation.
+The pull phase evaluates nodes **top-down within a segment**, ensuring that a negation node sees the complete delta state of its upstream join before deciding whether to emit or retract tokens.
+
+=== Accumulator Determinism
+
+When `retract-fn` is not provided, accumulators fall back to full re-accumulation.
+This preserves correctness at the cost of performance -- the same tradeoff as the current implementation.
+
+When `retract-fn` IS provided, the result must be equivalent to full re-accumulation.
+Built-in accumulators (`sum`, `count`) satisfy this by construction.
+User-defined accumulators with incorrect `retract-fn` may produce wrong results -- this is an existing contract, not a new one.
+
+=== Ordering Guarantees
+
+Clara does not guarantee a specific rule execution order beyond salience groups.
+PHREAK preserves this: within a salience group, the activation queue ordering is unchanged.
+The only difference is **when** activations are discovered (lazily during pull vs eagerly during insert), not how they are ordered once discovered.
+
+== Performance Expectations
+
+=== Best Case
+
+Sparse networks with many rules but few active paths.
+PHREAK skips entire subgraphs that are not dirty, avoiding O(rules) work per insertion.
+
+=== Neutral Case
+
+Dense networks where most paths are active most of the time.
+PHREAK adds slight overhead from dirty tracking and pull traversal, but the actual join work is the same.
+
+=== Accumulator Optimization
+
+Accumulators with `retract-fn` benefit significantly: a single element change triggers an incremental update instead of full re-accumulation.
+When the accumulated result is unchanged, no downstream propagation occurs at all.
+
+== References
+
+* Mark Proctor, "PHREAK Algorithm" -- Drools design rationale (2012-2013)
+* Charles Forgy, "Rete: A Fast Algorithm for the Many Pattern / Many Object Pattern Match Problem" (1982)
+* Drools documentation: Rule Engine internals, PHREAK evaluation
+* Clara Rules: link:rete-engine-optimizations.adoc[Rete Engine Architecture & Optimizations]
