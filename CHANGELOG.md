@@ -26,6 +26,7 @@ Fork-specific changes (based on upstream 0.24.0):
 * Add single-element fast path in `right-activate` and single-token fast path in `left-activate`/`left-retract`/`right-retract` — uses `mapv`/`keep` instead of `eager-for` for the dominant 1-fact-insert case
 * Replace `platform/eager-for` with `mapv` in `RootJoinNode` `right-activate`/`right-retract` (no cross-product needed)
 * Add single-item fast path in `propagate-items-to-nodes`: skip `group-by-seq` (LinkedHashMap + JavaEqualityWrapper) for single-item dispatch
+* **Phase 3.1 — PHREAK-inspired demand-pull token generation**: `RootJoinNode` defers token creation when all children are demand-pull eligible `HashJoinNode`s with empty alpha-memory; `HashJoinNode.right-activate` generates tokens on-demand by pulling elements from the parent `RootJoinNode`'s alpha-memory. Avoids O(|A|) token allocations when condition A has many matching facts but condition B has none yet. Compiler computes `:left-parent-id` for eligible `HashJoinNode`s.
 
 #### Accumulators
 

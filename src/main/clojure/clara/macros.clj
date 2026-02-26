@@ -113,12 +113,14 @@
               ~(when sub-idx
                  (#'com/compile-sub-index-token-key-fn
                    id (mapv :token-expr sub-idx)
-                   (:join-filter-join-bindings beta-node)))))
+                   (:join-filter-join-bindings beta-node)))
+               nil))
           `(eng/->HashJoinNode
             ~id
             '~condition
             ~(gen-beta-network child-ids beta-graph all-bindings)
-            ~join-bindings))
+            ~join-bindings
+            nil))
 
         :negation
         (if (:join-filter-expressions beta-node)
@@ -137,7 +139,8 @@
             ~id
             '~condition
             ~(gen-beta-network child-ids beta-graph all-bindings)
-            ~join-bindings))
+            ~join-bindings
+            nil))
 
         :test
         `(eng/->TestNode

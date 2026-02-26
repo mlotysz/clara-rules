@@ -619,26 +619,27 @@ Classic Rete eagerly propagates every change through the entire network.
 The PHREAK algorithm (used in Drools) instead propagates lazily — nodes only evaluate when downstream demand exists (i.e., a production node could potentially fire).
 
 ....
-  Eager Rete (current):
-    insert fact → propagate through ALL matching paths immediately
+  Eager Rete:
+    RootJoinNode receives fact → immediately create tokens → send to all HashJoinNode children
+    (even when children have no facts to join against yet)
 
-  Lazy/PHREAK:
-    insert fact → mark paths as dirty
-    fire-rules → walk dirty paths top-down, evaluate only what's needed
+  Demand-pull (implemented):
+    RootJoinNode receives fact → defer token creation when ALL HashJoinNode children have
+    empty alpha-memory → store only the element
+    HashJoinNode receives first fact → demand-pull parent elements → create tokens on-demand
 ....
 
-**Key ideas:**
+**Implementation:**
 
-* Maintain a dirty/stale flag per node segment
-* On `fire-rules`, traverse from production nodes backward, pulling data through the network
-* Skip evaluation for entire sub-networks that cannot produce new activations
-* Particularly beneficial for sessions with many rules but few active at any time
+The optimization operates at the `RootJoinNode` → `HashJoinNode` boundary:
 
-**Considerations:**
+* `RootJoinNode.right-activate`: if *all* children are `HashJoinNode`s with `:left-parent-id` set (demand-pull eligible) AND *none* have any alpha-elements yet, skip `send-tokens`. Elements are still stored via `add-elements!`.
+* `HashJoinNode.right-activate`: when no tokens exist in beta-memory and `:left-parent-id` is set, demand-pull tokens from the parent `RootJoinNode`'s alpha-memory. Elements are filtered to match the current `join-bindings` and tokens are generated and stored for future activations.
+* `compiler.clj`: computes `:left-parent-id` for each non-root join node whose single parent is a `RootJoinNode`. Passed to `->HashJoinNode` only (not `ExpressionJoinNode`, which has more complex sub-indexing semantics).
 
-* Significant architectural change — touches session model, memory, and all node types
-* Must preserve correctness of truth maintenance under lazy evaluation
-* Negation and accumulation semantics need careful handling
+**Benefit:** Avoids creating O(|A|) tokens in the beta network when condition A has many matching facts but condition B (which A must join with) has none. Tokens are generated lazily only when there is something to join against.
+
+**Scope:** Limited to direct `RootJoinNode` → `HashJoinNode` edges. Recursive demand-pull and `ExpressionJoinNode` demand-pull are deferred to future work.
 
 === 3.2 — Incremental Truth Maintenance via Delta Propagation
 
@@ -714,9 +715,9 @@ Delta propagation would instead compute the _difference_ between old and new sta
 |✓ Done
 
 |3.1
-|Lazy/demand-driven evaluation (PHREAK)
-|`engine.cljc`, `memory.cljc`
-|Proposed
+|Demand-pull token generation (PHREAK-inspired): defer `RootJoinNode` → `HashJoinNode` token creation until elements arrive
+|`engine.cljc`, `compiler.clj`, `macros.clj`
+|✓ Done
 
 |3.2
 |Incremental truth maintenance (delta propagation)

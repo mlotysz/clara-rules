@@ -1783,7 +1783,8 @@
    is-root :- sc/Bool
    children :- [sc/Any]
    expr-fn-lookup :- schema/NodeFnLookup
-   new-bindings :- #{sc/Keyword}]
+   new-bindings :- #{sc/Keyword}
+   left-parent-id :- (sc/maybe sc/Int)]
 
   (let [{:keys [condition production query join-bindings env]} beta-node
 
@@ -1818,12 +1819,14 @@
             (when (:sub-index-equalities beta-node)
               (compiled-expr-fn id :sub-index-element-key-expr))
             (when (:sub-index-equalities beta-node)
-              (compiled-expr-fn id :sub-index-token-key-expr)))
+              (compiled-expr-fn id :sub-index-token-key-expr))
+            nil)
           (eng/->HashJoinNode
             id
             condition
             children
-            join-bindings)))
+            join-bindings
+            left-parent-id)))
 
       :negation
       ;; Check to see if the negation includes an
@@ -1939,7 +1942,18 @@
                     ;; id-to-compiled-nodes map is sorted.
                     children (->> (get forward-edges id-to-compile)
                                  (select-keys id-to-compiled-nodes)
-                                 (vals))]
+                                 (vals))
+
+                    is-root (root-node? backward-edges id-to-compile)
+
+                    ;; Optimization 3.1: compute the RootJoinNode parent id for demand-pull.
+                    ;; Non-nil only when the node has exactly one parent and that parent is a root.
+                    left-parent-id (when (not is-root)
+                                     (let [pids (get backward-edges id-to-compile)]
+                                       (when (= 1 (count pids))
+                                         (let [pid (first pids)]
+                                           (when (root-node? backward-edges pid)
+                                             pid)))))]
 
                 ;; Sanity check for our logic...
                 (assert (= (count children)
@@ -1952,10 +1966,11 @@
                          id-to-compile
                          (compile-node node-to-compile
                                        id-to-compile
-                                       (root-node? backward-edges id-to-compile)
+                                       is-root
                                        children
                                        expr-fn-lookup
-                                       (get id-to-new-bindings id-to-compile))))))
+                                       (get id-to-new-bindings id-to-compile)
+                                       left-parent-id)))))
             ;; The node IDs have been determined before now, so we just need to sort the map returned.
             ;; This matters because the engine will left-activate the beta roots with the empty token
             ;; in the order that this map is seq'ed over.

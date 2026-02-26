@@ -850,18 +850,22 @@
 
     (l/right-activate! listener node elements)
 
-
     ;; Add elements to the working memory to support analysis tools.
     (mem/add-elements! memory node join-bindings elements)
-    ;; Simply create tokens and send it downstream.
-    (send-tokens
-     transport
-     memory
-     listener
-     children
-     (mapv (fn [{:keys [fact bindings]}]
-             (->Token [(match-pair fact id)] bindings))
-           elements)))
+    ;; Optimization 3.1: If all children support demand-pull (have :left-parent-id set)
+    ;; and have no alpha-elements yet, defer token creation.  Tokens will be generated
+    ;; on-demand in HashJoinNode.right-activate when elements first arrive there.
+    (when-not (and (every? :left-parent-id children)
+                   (every? #(empty? (mem/get-elements-all memory %)) children))
+      ;; Simply create tokens and send it downstream.
+      (send-tokens
+       transport
+       memory
+       listener
+       children
+       (mapv (fn [{:keys [fact bindings]}]
+               (->Token [(match-pair fact id)] bindings))
+             elements))))
 
   (right-retract [node join-bindings elements memory transport listener]
 
@@ -885,7 +889,7 @@
 ;; Record for the join node, a type of beta node in the rete network. This node performs joins
 ;; between left and right activations, creating new tokens when joins match and sending them to
 ;; its descendents.
-(defrecord HashJoinNode [id condition children binding-keys]
+(defrecord HashJoinNode [id condition children binding-keys left-parent-id]
   ILeftActivate
   (left-activate [node join-bindings tokens memory transport listener]
     ;; Add token to the node's working memory for future right activations.
@@ -944,23 +948,43 @@
   (right-activate [node join-bindings elements memory transport listener]
     (mem/add-elements! memory node join-bindings elements)
     (l/right-activate! listener node elements)
-    ;; Short-circuit: skip cross-product when no tokens exist for these bindings.
-    (when-let [tokens (seq (mem/get-tokens memory node join-bindings))]
-      (send-tokens
-       transport
-       memory
-       listener
-       children
-       (if (next elements)
-         (platform/eager-for [{:keys [fact bindings] :as element} elements
-                              :let [mp (match-pair fact id)]
-                              token tokens]
-                             (->Token (conj (:matches token) mp) (conj (:bindings token) bindings)))
-         (let [{:keys [fact bindings]} (first elements)
-               mp (match-pair fact id)]
-           (mapv (fn [token]
-                   (->Token (conj (:matches token) mp) (conj (:bindings token) bindings)))
-                 tokens))))))
+    ;; Optimization 3.1: demand-pull tokens from the RootJoinNode parent when no tokens
+    ;; exist yet for these bindings (deferred-token case).  If left-parent-id is nil,
+    ;; or tokens already exist, use the normal short-circuit path.
+    (let [existing-tokens (mem/get-tokens memory node join-bindings)
+          tokens (or (seq existing-tokens)
+                     (when left-parent-id
+                       ;; RootJoinNode stores all elements at join-bindings={}.
+                       ;; Filter to those whose bindings match the current join-bindings.
+                       (let [parent-elements (mem/get-elements memory {:id left-parent-id} {})
+                             matched (if (empty? join-bindings)
+                                       parent-elements
+                                       (filter (fn [e]
+                                                 (= join-bindings
+                                                    (select-keys (:bindings e) binding-keys)))
+                                               parent-elements))]
+                         (when (seq matched)
+                           (let [gen-tokens (mapv (fn [{:keys [fact bindings]}]
+                                                    (->Token [(match-pair fact left-parent-id)] bindings))
+                                                  matched)]
+                             (mem/add-tokens! memory node join-bindings gen-tokens)
+                             gen-tokens)))))]
+      (when tokens
+        (send-tokens
+         transport
+         memory
+         listener
+         children
+         (if (next elements)
+           (platform/eager-for [{:keys [fact bindings] :as element} elements
+                                :let [mp (match-pair fact id)]
+                                token tokens]
+                               (->Token (conj (:matches token) mp) (conj (:bindings token) bindings)))
+           (let [{:keys [fact bindings]} (first elements)
+                 mp (match-pair fact id)]
+             (mapv (fn [token]
+                     (->Token (conj (:matches token) mp) (conj (:bindings token) bindings)))
+                   tokens)))))))
 
   (right-retract [node join-bindings elements memory transport listener]
     (l/right-retract! listener node elements)
@@ -1001,7 +1025,7 @@
     beta-bindings))
 
 (defrecord ExpressionJoinNode [id condition join-filter-fn children binding-keys
-                               element-key-fn token-key-fn]
+                               element-key-fn token-key-fn left-parent-id]
   ILeftActivate
   (left-activate [node join-bindings tokens memory transport listener]
     ;; Add token to the node's working memory for future right activations.
