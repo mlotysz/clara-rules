@@ -658,6 +658,36 @@ Delta propagation would instead compute the _difference_ between old and new sta
 
 **Expected benefit:** Reduces redundant work when a rule's match set changes slightly (e.g., one of many matching facts is retracted, but the accumulated result is unchanged).
 
+**Design notes (from implementation investigation):**
+
+A naïve engine-level approach — caching TMS retractions in a per-`fire-rules*` volatile and cancelling them against subsequent logical re-insertions of the same fact — was prototyped and reverted due to a fundamental correctness violation.
+The problem: `ProductionNode.left-retract` fires during `flush-updates` (between activations).
+Deferring the resulting retraction into a cache means it is not yet reflected in the alpha network.
+Any activation that fires before the cache is drained can therefore observe stale facts (e.g. an accumulator rule sees a fact that has logically been invalidated but whose alpha-retraction has not yet propagated).
+
+....
+  Broken: per-fire-rules* retraction cache
+
+    Activation A fires → RHS retracts F1 → flush-rhs-retractions! → alpha-retract F1
+      → ProductionNode(rule-B).left-retract → Cold queued in retraction cache (not yet in pending-updates)
+    Activation C fires (accumulator rule) → observes Cold still in the network → WRONG result
+    Activation B fires with new token → flush-insertions!(Cold) → cache hit → "cancels" retraction
+    flush-tms-retractions!() → nothing to drain
+    BUT: Activation C already fired with stale state → incorrect final result
+....
+
+The correct approach must operate at the **`AccumulateNode` level**, not the general engine level:
+
+* When an accumulator's input set changes by adding or removing one fact, apply `retract-fn` + `reduce-fn` incrementally instead of retracting the old result and re-accumulating from scratch.
+* This is safe because the accumulate node owns its own result state and can guarantee that the new result is available to downstream nodes before any activation fires.
+* `CancellingUpdateCache` (already available via `{:cancelling true}` in `fire-rules`) handles cancellation of equal insertions and retractions at the `pending-updates` level, but is CLJ-only and requires opt-in. Making it the default or extending it to CLJS is a lower-effort partial improvement.
+
+**Pre-requisites / considerations:**
+
+* Accumulators must expose an incremental update path; current `Accumulator` record has `retract-fn` and `reduce-fn` but no explicit delta API.
+* Correctness of negation and join nodes downstream of the accumulate result must be preserved.
+* The `{:cancelling true}` mode already solves the symmetric insert+retract case for unconditional facts; the TMS case is harder because the retraction token and the re-insertion token differ.
+
 == Optimization Summary
 
 [cols="1,3,2,1"]
