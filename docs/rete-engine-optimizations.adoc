@@ -608,12 +608,42 @@ A `(next items)` guard skips `group-by-seq` entirely and calls `propagate-fn` di
 ----
 
 
+=== 2.8 — NegationWithJoinFilterNode Sub-Indexing
 
-The following optimizations have been identified but not yet implemented.
+**Files:** `compiler.clj`, `engine.cljc` | **Impact:** Reduced O(T×E) → O(T+E) for `:not` conditions with join filters
+
+`NegationWithJoinFilterNode` implements `:not` conditions that carry an arbitrary `join-filter-fn` (a predicate evaluated against each token–element pair).
+The original implementation scanned all elements for every token — O(T×E) per activation.
+Like the sub-indexing in 2.4, equality sub-expressions in the join filter are extracted at compile time to build a hash index at runtime.
+
+At compile time (`compiler.clj`), top-level equalities in the `join-filter-expressions` are identified and two key-extraction functions are generated:
+
+* `element-key-fn` — extracts a composite key from `(fact, element-bindings)` (fact side)
+* `token-key-fn` — extracts the matching composite key from a token's bindings (token side)
+
+At runtime, elements are grouped by `element-key-fn` into a local index.
+Each token looks up only its matching candidate set via `token-key-fn` before applying the residual `join-filter-fn`.
+Two runtime paths:
+
+* **Batch path** (multiple elements): build `token-index` and `prev-element-index` once for all elements; use `mapcat` + `distinct` + `remove` to compute newly-blocked tokens in O(T+E)
+* **Single-element fast path**: skip `group-by` allocation — use a direct key comparison over tokens and a linear scan over `prev-for-key`
+
+Falls back to the original linear scan when `element-key-fn` is nil (no indexable equalities found).
+
+....
+  Before:
+    for each token: scan all elements → O(T × E)
+
+  After:
+    build index: elements grouped by element-key-fn → O(E)
+    for each token: lookup by token-key-fn → O(T + E) total
+....
+
+This is the primary driver of the large speedups observed in negation-with-join benchmark scenarios (scenarios 22–28).
 
 === 3.1 — Lazy/Demand-Driven Evaluation (PHREAK-Inspired)
 
-**Phase:** 3
+**Files:** `engine.cljc`, `compiler.clj`, `macros.clj` | **Impact:** Avoids O(|A|) token allocations when condition A has many matching facts but condition B has none yet
 
 Classic Rete eagerly propagates every change through the entire network.
 The PHREAK algorithm (used in Drools) instead propagates lazily — nodes only evaluate when downstream demand exists (i.e., a production node could potentially fire).
@@ -640,6 +670,8 @@ The optimization operates at the `RootJoinNode` → `HashJoinNode` boundary:
 **Benefit:** Avoids creating O(|A|) tokens in the beta network when condition A has many matching facts but condition B (which A must join with) has none. Tokens are generated lazily only when there is something to join against.
 
 **Scope:** Limited to direct `RootJoinNode` → `HashJoinNode` edges. Recursive demand-pull and `ExpressionJoinNode` demand-pull are deferred to future work.
+
+== Proposed Optimizations
 
 === 3.2 — Incremental Truth Maintenance via Delta Propagation
 
@@ -742,6 +774,11 @@ The correct approach must operate at the **`AccumulateNode` level**, not the gen
 |2.7
 |Collection-oriented batch joins (match-pair hoisting, single-item fast paths, RootJoinNode mapv, propagate-items-to-nodes fast path)
 |`engine.cljc`
+|✓ Done
+
+|2.8
+|`NegationWithJoinFilterNode` sub-indexing: O(T×E) → O(T+E) for `:not` conditions with join filters
+|`compiler.clj`, `engine.cljc`
 |✓ Done
 
 |3.1

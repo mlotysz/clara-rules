@@ -8,8 +8,113 @@ image:{url-repo}/actions/workflows/clojure.yml/badge.svg[Build Status, link={url
 
 A forward-chaining rules engine for Clojure(Script).
 
-This is a fork of {url-upstream}[oracle-samples/clara-rules] with a modernized build system (Clojure CLI / deps.edn instead of Leiningen).
+This is a fork of {url-upstream}[oracle-samples/clara-rules].
 See {url-docs}[clara-rules.org] for documentation.
+
+== Why This Fork
+
+The upstream repository has been dormant since 2022 (last release 0.24.0).
+This fork modernizes the build system and applies substantial performance optimizations to the Rete engine.
+
+=== Build system
+
+* Migrated from Leiningen to Clojure CLI (deps.edn + tools.build)
+* Targets Java 21+, upgraded to Clojure 1.12.4 / ClojureScript 1.12.101 / Prismatic Schema 1.4.1
+* CLJS tests compile to Node.js target — no browser or Puppeteer required
+* Reduced clj-kondo lint warnings from 991 → 6 (5 intentional) across all source files
+
+=== Performance optimizations
+
+Major algorithmic improvements across the alpha and beta networks:
+
+[cols="2,1"]
+|===
+|Optimization |Status
+
+|`DiscriminationNode` — hash-based alpha dispatch on equality constraints
+|Done
+
+|`FusedAlphaNode` — batched alpha dispatch for multi-node fact types
+|Done
+
+|Join node unlinking — skip cross-product when opposing side is empty
+|Done
+
+|Beta sub-indexing for `ExpressionJoinNode` — O(T×E) → O(T+E)
+|Done
+
+|Beta sub-indexing for `NegationWithJoinFilterNode` — O(T×E) → O(T+E)
+|Done
+
+|Demand-pull token generation (PHREAK-inspired) — defer `RootJoinNode` token creation
+|Done
+
+|Allocation reduction — volatiles, defrecord, MapEntry, eager seqs, mutable caches
+|Done
+|===
+
+=== Benchmark results (N=100,000 facts, vs oracle 0.24.0)
+
+Selected scenarios from the included benchmark suite (`bench/`):
+
+[cols="3,1,1,1"]
+|===
+|Scenario |Oracle (ms) |Fork (ms) |Speedup
+
+|Hash join 1:1 — 50k×50k all match
+|171,083
+|176
+|**~975×**
+
+|Hash join sparse — 10% match rate
+|96,093
+|126
+|**~762×**
+
+|Two parallel hash joins
+|156,814
+|253
+|**~619×**
+
+|Three-way hash join
+|91,656
+|206
+|**~446×**
+
+|Truth maintenance convergence
+|41,341
+|211
+|**~196×**
+
+|Negation + alpha filter
+|19,891
+|158
+|**~126×**
+
+|Join + negation
+|69,513
+|641
+|**~108×**
+
+|Double negation
+|125,910
+|3,374
+|**~37×**
+
+|Hash join 1:many (1k×~99)
+|5,764
+|238
+|**~24×**
+
+|20 alpha nodes — even distribution
+|257
+|102
+|**~2.5×**
+|===
+
+The extreme join speedups (hundreds to near-thousands×) reflect the oracle's O(N²) behaviour for large cross-products, eliminated here by beta sub-indexing and join unlinking.
+Negation speedups are driven by `NegationWithJoinFilterNode` sub-indexing.
+Simpler scenarios (pure alpha, rule chains) show modest 1.25–1.4× improvements from allocation reduction.
 
 == Usage
 
