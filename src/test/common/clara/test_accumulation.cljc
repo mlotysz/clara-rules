@@ -14,7 +14,6 @@
                                               ->ColdAndWindy map->FlexibleFields ->TemperatureHistory
                                               ->First ->Second ->Hot ->LousyWeather]]
                [clojure.test :refer [is deftest run-tests testing use-fixtures]]
-               [clara.rules.accumulators]
                [schema.test :as st])
      (:import [clara.rules.testfacts
                Temperature
@@ -88,9 +87,9 @@
                   (reset! side-effect-holder ?t)]]
 
    :sessions [rule1-session [rule1] {}
-              rule2-session [rule2] {}
-              rule3-session [rule3] {}
-              rule4-session [rule4] {}]}
+              _rule2-session [rule2] {}
+              _rule3-session [rule3] {}
+              _rule4-session [rule4] {}]}
 
   (testing "Unrelated constraint on the field and then a binding with the variable first"
     (reset! side-effect-holder nil)
@@ -103,7 +102,7 @@
 
 (defn identity-retract
   "Retract function that does nothing for testing purposes."
-  [state retracted]
+  [state _retracted]
   state)
 
 (defn min-fact
@@ -425,7 +424,7 @@
                                           (insert! (->Cold ?min-temp))]]
 
    :sessions [session [get-cold-temp get-min-temp-under-threshhold] {:fact-type-fn type-or-class}
-              simple-session [get-min-temp-under-threshhold] {:fact-type-fn type-or-class}]}
+              _simple-session [get-min-temp-under-threshhold] {:fact-type-fn type-or-class}]}
 
   (let [;; Test assertion helper.
         assert-query-results (fn [test-name session & expected-results]
@@ -564,7 +563,7 @@
                    :type :temp-threshold}
 
         temp-10-mci (->Temperature 10 "MCI")
-        temp-15-lax (->Temperature 15 "LAX")
+        _temp-15-lax (->Temperature 15 "LAX")
 
         cold-results (-> empty-session
                          (insert thresh-20

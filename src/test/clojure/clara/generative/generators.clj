@@ -30,7 +30,7 @@
   [ops]
   (let [alter-fact-count (fn [alter-fn]
                            (fn [fc facts]
-                             (reduce (fn [updated-fc f]
+                             (reduce (fn [_updated-fc f]
                                        (update fc f alter-fn))
                                      fc facts)))
         inc-fact-count (alter-fact-count (fnil inc 0))

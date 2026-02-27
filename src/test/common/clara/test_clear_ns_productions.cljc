@@ -65,7 +65,7 @@
 
 ;;; Then tests validating what productions the respective sessions have.
 (deftest cleared?
-  (let [uncleared (-> uncleared-session (insert :a) (fire-rules))]
+  (let [_uncleared (-> uncleared-session (insert :a) (fire-rules))]
     (is (= :before-clearing @tu/side-effect-holder))
     (reset! tu/side-effect-holder nil))
   (let [cleared (-> cleared-session (insert :a) (fire-rules))]

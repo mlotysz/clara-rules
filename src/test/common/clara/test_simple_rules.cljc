@@ -108,7 +108,7 @@
 
    :sessions [empty-session [cold-windy-rule] {}]}
 
-  (let [session (-> empty-session
+  (let [_session (-> empty-session
                     (insert (->WindSpeed 30 "MCI"))
                     (insert (->Temperature 10 "MCI"))
                     fire-rules)]
@@ -167,7 +167,7 @@
 
   (reset! side-effect-holder {})
 
-  (let [session (-> empty-session
+  (let [_session (-> empty-session
                     (insert (->WindSpeed 30 "MCI"))
                     (insert (->Temperature 10 "MCI"))
                     fire-rules)]
@@ -187,7 +187,7 @@
 
    :sessions [empty-session [cold-rule subzero-rule] {}]}
 
-  (let [session (-> empty-session
+  (let [_session (-> empty-session
                     (insert (->Temperature -10 "MCI"))
                     fire-rules)]
 

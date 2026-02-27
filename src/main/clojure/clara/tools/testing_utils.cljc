@@ -7,7 +7,6 @@
      (:require [clara.rules.update-cache.core :as uc]
                [clara.rules.update-cache.cancelling :as ca]
                [clara.rules.compiler :as com]
-               [clara.rules.engine :as eng]
                [clara.macros :as m]
                [clara.rules.dsl :as dsl]
                [clojure.test :refer [is]]))

@@ -2818,13 +2818,12 @@
 
             ;; No activations — flush pending updates and pull; if new
             ;; activations appeared, loop again.
-            (do
-              (let [flushed        (do-flush-and-pull)
+            (let [flushed        (do-flush-and-pull)
                     upcoming-group (mem/next-activation-group transient-memory)]
                 (when (and (not null-listener) flushed)
                   (l/activation-group-transition! transient-listener next-group upcoming-group))
                 (when upcoming-group
-                  (recur upcoming-group next-group))))))))))
+                  (recur upcoming-group next-group)))))))))
 
 ;;; End PHREAK section
 ;;; ============================================================

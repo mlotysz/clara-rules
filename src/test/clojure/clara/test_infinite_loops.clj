@@ -153,7 +153,7 @@
   (let [watched-session (ld/with-loop-detection empty-session 10 :throw-exception)]
 
     (try
-      (do (-> watched-session
+      (-> watched-session
               tr/with-tracing
               (insert (->Cold "ARN"))
               ;; Use a small value here to ensure that we don't run out of memory before throwing.
@@ -162,7 +162,7 @@
               ;; like these but we can at least throw when there is enough memory available to hold the facts
               ;; created in the loop.
               fire-rules)
-          (is false "The infinite loop did not throw an exception."))
+          (is false "The infinite loop did not throw an exception.")
       (catch Exception e
         (let [data-maps (ex-data-maps e)
               loop-data (filter :clara-rules/infinite-loop-suspected data-maps)]

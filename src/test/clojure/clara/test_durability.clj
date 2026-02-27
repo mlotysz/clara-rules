@@ -5,10 +5,8 @@
             [clara.rules.durability :as d]
             [clara.rules.durability.fressian :as df]
             [clara.durability-rules :as dr]
-            [clara.rules.accumulators :as acc]
             [clara.rules.testfacts :refer :all]
             [schema.test :as st]
-            [clojure.java.io :as jio]
             [clojure.test :refer :all]
             [clara.rules.compiler :as com]
             [clara.tools.testing-utils :as tu])
@@ -154,7 +152,7 @@
          san
          chi
          irk
-         ten
+         _ten
          twenty
          fifty
          forty
@@ -324,7 +322,7 @@
 
   (testing "Repeated SerDe of rulebase"
     (let [s (mk-session 'clara.durability-rules)
-          rb (-> s eng/components :rulebase)
+          _rb (-> s eng/components :rulebase)
           deserialized1 (rb-serde s nil)
           ;; Need a session to do the 2nd round of SerDe.
           restored1 (d/assemble-restored-session deserialized1 {})
@@ -350,7 +348,7 @@
 
 (deftest test-durability-testnode-serde
   (let [s (mk-session 'clara.durability-rules)
-        rb (-> s eng/components :rulebase)
+        _rb (-> s eng/components :rulebase)
         deserialized1 (rb-serde s nil)
         ;; Need a session to do the 2nd round of SerDe.
         restored1 (d/assemble-restored-session deserialized1 {})
@@ -416,6 +414,7 @@
 ;; Issue 422 (https://github.com/cerner/clara-rules/issues/422)
 ;; A test to demonstrate the difference in error messages provided when compilation context is omitted
 (deftest test-compilation-ctx
+  #_{:clj-kondo/ignore [:inline-def]}
   (def test-compilation-ctx-var 123)
   (let [rule (dsl/parse-rule [[Long (== this test-compilation-ctx-var)]]
                              (println "here"))

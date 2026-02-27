@@ -43,7 +43,7 @@
 
           operation-permutations (gen/ops->permutations operations {})
 
-          expected-output? (fn [session permutation]
+          expected-output? (fn [session _permutation]
                              (let [actual-temp-hist (-> session
                                                         (query q)
                                                         frequencies)

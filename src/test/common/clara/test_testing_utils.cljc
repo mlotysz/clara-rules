@@ -38,7 +38,7 @@
                      [[Cold (= ?t temperature)]]]]
 
    :sessions [session1 [rule1 query1] {}
-              session2 [rule1 query1] {:fact-type-fn (fn [fact] :bogus)}]}
+              session2 [rule1 query1] {:fact-type-fn (fn [_fact] :bogus)}]}
 
   (reset! test-ran-atom true)
   (is (= [{:?t -50}]

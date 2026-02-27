@@ -1,8 +1,8 @@
 (ns clara.sample-ruleset
-  (:use clara.rules
-        clara.rules.testfacts
-        clojure.pprint
-        clara.rules.dsl)
+  (:require [clara.rules :refer :all]
+            [clara.rules.testfacts :refer :all]
+            [clojure.pprint :refer :all]
+            [clara.rules.dsl :refer :all])
   (:refer-clojure :exclude [==])
   (:import [clara.rules.testfacts
             Temperature

@@ -136,6 +136,7 @@
                     (insert (->Temperature 80 "MCI"))
                     fire-rules)]
 
+    #_{:clj-kondo/ignore [:redundant-let]}
     (let [accum-condition (-> coldest-query :lhs first (select-keys [:accumulator :from]))
           query-explanations (-> (inspect session) (:query-matches) (get coldest-query))]
 
@@ -161,6 +162,7 @@
                     (insert (->Temperature 25 "MCI"))
                     fire-rules)]
 
+    #_{:clj-kondo/ignore [:redundant-let]}
     (let [matches (-> (inspect session)
                       :query-matches
                       (get colder-query)
@@ -189,7 +191,7 @@
                     fire-rules)]
 
     ;; Ensure that no returned contraint includes a generated variable name.
-    (doseq [{:keys [matches bindings]} (-> (inspect session) :query-matches (get distinct-temps-query))
+    (doseq [{:keys [matches]} (-> (inspect session) :query-matches (get distinct-temps-query))
             constraints (map (comp :constraints :condition) matches)
             term (flatten constraints)]
       (is (not (and (symbol? term)
@@ -520,7 +522,7 @@
                               (let [matching-entries (->> session
                                                           inspect
                                                           :condition-matches
-                                                          (filter (fn [[k v]] (= (:type k)
+                                                          (filter (fn [[k _v]] (= (:type k)
                                                                                  fact-type))))]
                                 (if (> (count matching-entries) 1)
                                   (throw (ex-info "Found multiple matches of type"

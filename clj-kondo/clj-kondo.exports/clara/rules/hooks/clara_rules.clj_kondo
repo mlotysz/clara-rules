@@ -160,7 +160,8 @@
 
                                  (and (= :list (node-type fact-node))
                                       (= :from (-> condition first node-value)))
-                                 (analyze-conditions (rest condition) allow-bindings? (concat prev-bindings bindings) input-token production-args)
+                                 (cons [(api/vector-node [(api/token-node '_)]) fact-node]
+                                       (analyze-conditions (rest condition) allow-bindings? (concat prev-bindings bindings) input-token production-args))
 
                                  :else
                                  (analyze-constraints fact-node condition allow-bindings? (concat prev-bindings bindings) input-token production-args))
@@ -423,7 +424,7 @@
                                                  (:children options-node))]]
                       [name-node (api/list-node
                                    (list
-                                     (api/token-node 'clara.rules.compiler/mk-session)
+                                     (api/token-node 'clojure.core/vector)
                                      (api/vector-node
                                        (vec args-seq))))])
         args-seq (->> (concat rules-seq query-seq session-seq)

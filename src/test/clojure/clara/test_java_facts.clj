@@ -20,6 +20,7 @@
   (let [locs (doto (make-array String 2)
                (aset 0 "Florida")
                (aset 1 "Kansas"))]
+    #_{:clj-kondo/ignore [:redundant-let]}
     (let [session-strings (map :?s
                                (-> empty-session
                                    (rules/insert (BeanTestFact. locs))

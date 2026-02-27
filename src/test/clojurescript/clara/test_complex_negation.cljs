@@ -11,11 +11,8 @@
             [clara.rules.testfacts :refer [Temperature ->Temperature
                                            WindSpeed ->WindSpeed
                                            Cold ->Cold]]
-            [cljs.test :as t]
-            [cljs.test :refer-macros [run-tests
-                                      deftest
-                                      is]
-             :include-macros true]))
+            [cljs.test :as t
+             :refer-macros [run-tests deftest is]]))
 
 (defquery negation-inside-negation-query
   []

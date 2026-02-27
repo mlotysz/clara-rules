@@ -1,4 +1,32 @@
 {:config-paths ["../clj-kondo/clj-kondo.exports/clara/rules"]
- ;; Prismatic Schema's s/defn uses [args] :- ReturnType syntax (after the arg vector),
- ;; which clj-kondo incorrectly flags as misplaced. Disable this false positive.
- :linters {:schema-misplaced-return {:level :off}}}
+
+ :linters
+ {;; Prismatic Schema's s/defn uses [args] :- ReturnType syntax (after the arg vector),
+  ;; which clj-kondo incorrectly flags as misplaced. Disable this false positive.
+  :schema-misplaced-return {:level :off}
+
+  ;; DSL symbols (insert!, retract!, etc.) are called inside defrule/defquery/def-rules-test
+  ;; bodies that the hook processes, but the hook does not register those as var usages for
+  ;; the unused-referred-var linter. All such warnings in this project are false positives.
+  :unused-referred-var {:level :off}
+
+  ;; Java testfact classes (Temperature, Cold, etc.) are used as type names in LHS conditions,
+  ;; which the hook processes but does not register as import usages. False positives.
+  :unused-import {:level :off}
+
+  ;; Test files intentionally use :refer :all for convenience; narrowing every :refer list
+  ;; across hundreds of rule DSL usages is impractical given the hook's analysis limitations.
+  :refer-all {:level :off}
+
+  ;; The def-rules-test hook generates (clojure.test/deftest ...) and
+  ;; (clara.rules.compiler/mk-session ...) nodes. In .cljc files linted in CLJS mode,
+  ;; clojure.test and clara.rules.compiler (CLJ-only) appear unresolved.
+  ;; Also: cemerick.* references are dead-code comments in a CLJS test file.
+  :unresolved-namespace {:level :off}
+
+  ;; Several namespaces are required but only used inside defrule/defquery/def-rules-test
+  ;; bodies (e.g. acc/sum, acc/all).  The hook processes these bodies but does not register
+  ;; the namespace alias as "used" for the unused-namespace linter — false positives.
+  ;; Also covers side-effect-only requires (clara.sample-ruleset, clara.other-ruleset)
+  ;; and platform-conditional requires (cljs.test in .cljc CLJ branches).
+  :unused-namespace {:level :off}}}

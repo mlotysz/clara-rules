@@ -10,13 +10,10 @@
             [clara.rules.accumulators :as acc]
             [clara.rules.dsl :as dsl]
             [clara.tools.tracing :as t]
-            [clojure.set :as s]
             [clojure.edn :as edn]
-            [clojure.walk :as walk]
             [clara.sample-ruleset-seq :as srs]
             [clara.order-ruleset :as order-rules]
             [schema.test]
-            [schema.core :as sc]
             [clara.tools.testing-utils :as tu :refer [assert-ex-data]])
   (:import [clara.rules.testfacts Temperature WindSpeed Cold Hot TemperatureHistory
             ColdAndWindy LousyWeather First Second Third Fourth FlexibleFields]
@@ -52,7 +49,7 @@
 
 (defn identity-retract
   "Retract function that does nothing for testing purposes."
-  [state retracted]
+  [state _retracted]
   state)
 
 (defn average-value
@@ -817,7 +814,7 @@
 
 (deftest test-no-temp
 
-  (let [rule-output (atom nil)
+  (let [_rule-output (atom nil)
         ;; Insert a new fact and ensure it exists.
 
         temp-query (dsl/parse-query [] [[Temperature (= ?t temperature)]])
@@ -924,7 +921,7 @@
   (let [special-ancestor-query (dsl/parse-query [] [[?result <- :my-ancestor]])
         type-ancestor-query (dsl/parse-query [] [[?result <- Object]])
 
-        session (-> (mk-session [special-ancestor-query type-ancestor-query] :ancestors-fn (fn [type] [:my-ancestor]))
+        session (-> (mk-session [special-ancestor-query type-ancestor-query] :ancestors-fn (fn [_type] [:my-ancestor]))
                     (insert (->Temperature 15 "MCI"))
                     (insert (->Temperature 10 "MCI"))
                     (insert (->Temperature 80 "MCI"))
@@ -1078,7 +1075,7 @@
 
       ;; Ensure the rule output reflects the salience-defined order.
       ;; independently of the order of the rules.
-      (dotimes [n 10]
+      (dotimes [_n 10]
 
         (reset! salience-rule-output [])
 
@@ -1225,7 +1222,7 @@
 
         q2 (dsl/parse-query []
                             [[?res <- (acc/all) :from [Temperature]]
-                             [:test (not (empty? ?res))]])]
+                             [:test (seq ?res)]])]
 
     (is (= [{:?res [(->Temperature 9 "MCI")] :?t 9}]
            (-> (mk-session [q1])
@@ -1412,7 +1409,7 @@
         to-int-rule (dsl/parse-rule [[?s <- String]]
                                     (try
                                       (reset! int-value (Integer/parseInt ?s))
-                                      (catch NumberFormatException e
+                                      (catch NumberFormatException _e
                                         (reset! int-value -1))))]
 
     ;; Test successful integer parse.
@@ -1433,8 +1430,8 @@
   (let [q (dsl/parse-query []
                            ;; Make two conditions that are very similar, but differ
                            ;; where a nil will be compared to something else.
-                           [[(accumulate :retract-fn identity-retract :reduce-fn (fn [x y] nil)) :from [Temperature]]
-                            [(accumulate :retract-fn identity-retract :reduce-fn (fn [x y] 10)) :from [Temperature]]])
+                           [[(accumulate :retract-fn identity-retract :reduce-fn (fn [_x _y] nil)) :from [Temperature]]
+                            [(accumulate :retract-fn identity-retract :reduce-fn (fn [_x _y] 10)) :from [Temperature]]])
         s (mk-session [q])]
 
     ;; Mostly just ensuring the rulebase was compiled successfully.
@@ -2002,7 +1999,7 @@
               :rhs `(do (reset! ~'rule-output ~'?__token__))
               :env {:rule-output rule-output}}
 
-        session (-> (mk-session [rule])
+        _session (-> (mk-session [rule])
                     (insert (->Temperature 10 "MCI"))
                     (fire-rules))]
 
@@ -2020,9 +2017,8 @@
                           :reduce-fn conj
                           :retract-fn (fn [items retracted] (remove #{retracted} items))
                           :convert-return-fn (fn [items]
-                                               (do
-                                                 (swap! accum-state conj items)
-                                                 items))})
+                                               (swap! accum-state conj items)
+                                               items)})
 
         common-ancestor-rule (dsl/parse-rule [[?lists <- stateful-accum :from [List]]]
                                              ;; don't care about whats inserted
@@ -2031,7 +2027,7 @@
         array-list (ArrayList.)
         linked-list (LinkedList.)
 
-        ses (-> (mk-session [common-ancestor-rule])
+        _ses (-> (mk-session [common-ancestor-rule])
               (insert-all [array-list linked-list])
               (fire-rules))]
 
@@ -2211,7 +2207,7 @@
                                     (retract (->Cold 0))
                                     fire-rules)
 
-        single-ops-retract-fire-insertion (-> empty-session
+        _single-ops-retract-fire-insertion (-> empty-session
                                               (retract (->Cold 0))
                                               fire-rules
                                               (insert (->Cold 0)))
@@ -2375,6 +2371,7 @@
                                              [Temperature (= ?t temperature)
                                               (> ?t ?w)]])]
 
+    #_{:clj-kondo/ignore [:redundant-let]}
     (let [e (try
               (-> (mk-session [check-exception])
                   (insert (->WindSpeed 10 "MCI") (->Temperature nil "MCI"))

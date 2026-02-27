@@ -3,7 +3,6 @@
     [clara.rules.test-rules-data])
   (:require [cljs.test :as t]
     [clara.rules.engine :as eng]
-    [clara.rules.accumulators :as acc]
     [clara.rules :refer [insert retract fire-rules query insert!]
      :refer-macros [defrule defsession defquery]]
     [clara.rules.testfacts :refer [->Temperature Temperature
@@ -84,6 +83,7 @@
       ;; has been proposed in #292. Internally, this would facilitate session generation for CLJS
       ;; tests such as this one, and may be useful if exposed publicly.
 
+      #_{:clj-kondo/ignore [:inline-def]}
       (defsession test-salience-session 'clara.test-salience
                      :cache false
                      :activation-group-sort-fn (condp = sort-fn

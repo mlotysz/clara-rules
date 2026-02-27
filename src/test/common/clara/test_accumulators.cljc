@@ -112,7 +112,7 @@
                     (insert (->Temperature 80 "MCI"))
                     fire-rules)
 
-        min-retracted (-> session
+        _min-retracted (-> session
                           (retract (->Temperature 10 "MCI"))
                           fire-rules)
 

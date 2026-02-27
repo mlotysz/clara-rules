@@ -1,6 +1,6 @@
 (ns clara.other-ruleset
-  (:use clara.rules
-        clara.rules.testfacts)
+  (:require [clara.rules :refer :all]
+            [clara.rules.testfacts :refer :all])
   (:refer-clojure :exclude [==])
   (:import [clara.rules.testfacts
             Temperature

@@ -13,7 +13,6 @@
                                               ->ColdAndWindy map->FlexibleFields
                                               ->First ->Second ->Third ->Fourth]]
                [clojure.test :refer [is deftest run-tests testing use-fixtures]]
-               [clara.rules.accumulators]
                [schema.test :as st])
      (:import [clara.rules.testfacts
                Temperature
@@ -414,7 +413,7 @@
                              rule-with-empty-and-non-empty
                              rule-with-non-empty-and-empty] {}]}
   (reset! side-effect-holder [])
-  (let [session (-> empty-session
+  (let [_session (-> empty-session
                     (insert (->First)
                             (->Second)
                             (->Third)

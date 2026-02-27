@@ -1,6 +1,6 @@
 (ns clara.test-java
-  (:use clojure.test
-        clara.rules.testfacts)
+  (:require [clojure.test :refer :all]
+            [clara.rules.testfacts :refer :all])
   (:require [clara.sample-ruleset :as sample]
             [clara.other-ruleset :as other])
   (:import [clara.rules.testfacts Temperature WindSpeed Cold ColdAndWindy LousyWeather First Second Third Fourth]
