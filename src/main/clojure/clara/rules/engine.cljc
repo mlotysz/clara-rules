@@ -1203,60 +1203,79 @@
   (right-activate [node join-bindings elements memory transport listener]
     (mem/add-elements! memory node join-bindings elements)
     (l/right-activate! listener node elements)
-    ;; Short-circuit: skip cross-product when no tokens exist for these bindings.
-    (when-let [tokens (seq (mem/get-tokens memory node join-bindings))]
-      (if token-key-fn
-        ;; Sub-indexed path: build local token index, look up by element key
-        (send-tokens
-         transport memory listener children
-         (if (next elements)
-           (let [token-index (group-by token-key-fn tokens)]
+    ;; Demand-pull tokens from parent when token memory is empty (deferred-token case).
+    ;; Skipped in PHREAK mode (DeltaTransport) because RootJoinNode.evaluate-delta always
+    ;; sends token ops; demand-pull here would produce duplicates when those ops arrive.
+    (let [existing-tokens (mem/get-tokens memory node join-bindings)
+          tokens (or (seq existing-tokens)
+                     (when (and left-parent-id
+                                (not (instance? DeltaTransport transport)))
+                       (let [parent-elements (mem/get-elements memory {:id left-parent-id} {})
+                             matched (if (empty? join-bindings)
+                                       parent-elements
+                                       (filter (fn [e]
+                                                 (= join-bindings
+                                                    (select-keys (:bindings e) binding-keys)))
+                                               parent-elements))]
+                         (when (seq matched)
+                           (let [gen-tokens (mapv (fn [{:keys [fact bindings]}]
+                                                    (->Token [(match-pair fact left-parent-id)] bindings))
+                                                  matched)]
+                             (mem/add-tokens! memory node join-bindings gen-tokens)
+                             gen-tokens)))))]
+      (when tokens
+        (if token-key-fn
+          ;; Sub-indexed path: build local token index, look up by element key
+          (send-tokens
+           transport memory listener children
+           (if (next elements)
+             (let [token-index (group-by token-key-fn tokens)]
+               (platform/eager-for [{:keys [fact bindings] :as _element} elements
+                                    :let [key (element-key-fn fact bindings)
+                                          mp (match-pair fact id)]
+                                    token (get token-index key [])
+                                    :let [beta-bindings (if join-filter-fn
+                                                          (join-node-matches node join-filter-fn token fact bindings {})
+                                                          {})]
+                                    :when (if join-filter-fn beta-bindings true)]
+                                   (->Token (conj (:matches token) mp)
+                                            (conj (:bindings token) bindings beta-bindings))))
+             (let [{:keys [fact bindings]} (first elements)
+                   key (element-key-fn fact bindings)
+                   mp (match-pair fact id)]
+               (into []
+                     (keep (fn [token]
+                             (when (= key (token-key-fn token))
+                               (let [beta-bindings (if join-filter-fn
+                                                     (join-node-matches node join-filter-fn token fact bindings {})
+                                                     {})]
+                                 (when (if join-filter-fn beta-bindings true)
+                                   (->Token (conj (:matches token) mp)
+                                            (conj (:bindings token) bindings beta-bindings)))))))
+                     tokens))))
+          ;; Original path
+          (send-tokens
+           transport
+           memory
+           listener
+           children
+           (if (next elements)
              (platform/eager-for [{:keys [fact bindings] :as _element} elements
-                                  :let [key (element-key-fn fact bindings)
-                                        mp (match-pair fact id)]
-                                  token (get token-index key [])
-                                  :let [beta-bindings (if join-filter-fn
-                                                        (join-node-matches node join-filter-fn token fact bindings {})
-                                                        {})]
-                                  :when (if join-filter-fn beta-bindings true)]
+                                  :let [mp (match-pair fact id)]
+                                  token tokens
+                                  :let [beta-bindings (join-node-matches node join-filter-fn token fact bindings {})]
+                                  :when beta-bindings]
                                  (->Token (conj (:matches token) mp)
-                                          (conj (:bindings token) bindings beta-bindings))))
-           (let [{:keys [fact bindings]} (first elements)
-                 key (element-key-fn fact bindings)
-                 mp (match-pair fact id)]
-             (into []
-                   (keep (fn [token]
-                           (when (= key (token-key-fn token))
-                             (let [beta-bindings (if join-filter-fn
-                                                   (join-node-matches node join-filter-fn token fact bindings {})
-                                                   {})]
-                               (when (if join-filter-fn beta-bindings true)
+                                          (conj (:bindings token) bindings beta-bindings)))
+             (let [{:keys [fact bindings]} (first elements)
+                   mp (match-pair fact id)]
+               (into []
+                     (keep (fn [token]
+                             (let [beta-bindings (join-node-matches node join-filter-fn token fact bindings {})]
+                               (when beta-bindings
                                  (->Token (conj (:matches token) mp)
-                                          (conj (:bindings token) bindings beta-bindings)))))))
-                   tokens))))
-        ;; Original path
-        (send-tokens
-         transport
-         memory
-         listener
-         children
-         (if (next elements)
-           (platform/eager-for [{:keys [fact bindings] :as _element} elements
-                                :let [mp (match-pair fact id)]
-                                token tokens
-                                :let [beta-bindings (join-node-matches node join-filter-fn token fact bindings {})]
-                                :when beta-bindings]
-                               (->Token (conj (:matches token) mp)
-                                        (conj (:bindings token) bindings beta-bindings)))
-           (let [{:keys [fact bindings]} (first elements)
-                 mp (match-pair fact id)]
-             (into []
-                   (keep (fn [token]
-                           (let [beta-bindings (join-node-matches node join-filter-fn token fact bindings {})]
-                             (when beta-bindings
-                               (->Token (conj (:matches token) mp)
-                                        (conj (:bindings token) bindings beta-bindings))))))
-                   tokens)))))))
+                                          (conj (:bindings token) bindings beta-bindings))))))
+                     tokens))))))))
 
   (right-retract [node join-bindings elements memory transport listener]
     (l/right-retract! listener node elements)
@@ -2259,7 +2278,6 @@
   (right-activate [node join-bindings elements memory transport listener]
 
     (l/right-activate! listener node elements)
-
     ;; Simple right-activate implementation simple defers to
     ;; accumulator-specific logic.
     (right-activate-reduced

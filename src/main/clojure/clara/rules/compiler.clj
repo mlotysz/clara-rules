@@ -1841,7 +1841,7 @@
               (compiled-expr-fn id :sub-index-element-key-expr))
             (when (:sub-index-equalities beta-node)
               (compiled-expr-fn id :sub-index-token-key-expr))
-            nil)
+            left-parent-id)
           (eng/->HashJoinNode
             id
             condition
