@@ -1619,7 +1619,6 @@
            [s1 s2 s5 s6 s8]))
   (reset! com/default-session-cache original-cache)))
 
-#_{:clj-kondo/ignore [:unresolved-symbol]}
 (deftest test-try-eval-failures-includes-compile-ctx
   (let [q1 (dsl/parse-query [] [[:not [Temperature (= ?t temperature)]]])
         q2 (dsl/parse-query [] [[First (= ?b bogus)]])]
@@ -1933,7 +1932,6 @@
     (is (= [:hot :cold] holder2))))
 
 ;; TODO: Move this to test-dsl once a strategy for replicating assert-ex-data is determined and implemented.
-#_{:clj-kondo/ignore [:unresolved-symbol]}
 (deftest test-reused-var-in-constraints
   (let [q (dsl/parse-query [] [[Temperature (= ?t (+ 5 temperature)) (< ?t 10)]])
 

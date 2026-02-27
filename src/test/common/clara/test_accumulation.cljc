@@ -1096,7 +1096,7 @@
                fire-rules
                (query q))
            [])
-        (str "A nil initial value with matching elements should still not propagate if the final result is nil."))))
+        "A nil initial value with matching elements should still not propagate if the final result is nil.")))
 
 (def-rules-test test-multiple-minimum-accum-retractions
 
