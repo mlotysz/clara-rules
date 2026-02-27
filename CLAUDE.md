@@ -119,6 +119,11 @@ Result files in `bench/` are numbered snapshots for historical comparison:
 - `02-optimizations.txt` — fork after Phases 1–3.1
 - `03-phreak.txt` — fork after Phase 3.2 (PHREAK delta propagation)
 
-Run current fork: `clojure -M:bench`
-Save a new snapshot: `clojure -M:bench | tee bench/NN-description.txt`
-Fork vs oracle comparison: `bash bench/compare.sh`
+Default scenario subset (pricing use case — skip slow accumulators):
+```
+BENCH_ONLY=01,02,03,05,07,09,11,12,13,14,15,16,21,22,23,24,27,28,29,30,31,33,35,36,37,38,39,40,42,43
+```
+
+Run current fork: `BENCH_ONLY="...see above..." clojure -M:bench`
+Save a new snapshot: `BENCH_ONLY="..." clojure -M:bench | tee bench/NN-description.txt`
+Fork vs oracle comparison: `BENCH_ONLY="..." bash bench/compare.sh`
