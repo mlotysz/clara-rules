@@ -702,7 +702,6 @@
   (let [is-negation (= :not (first condition))
         is-exists (= :exists (first condition))
         accumulator (:accumulator condition)
-        _result-binding (:result-binding condition) ; Get the optional result binding used by accumulators.
         condition (cond
                    is-negation (second condition)
                    accumulator (:from condition)
@@ -935,7 +934,7 @@
 (defn- non-equality-unifications
   "Returns a set of unifications that do not use equality-based checks."
   [constraints]
-  (let [[bound-variables _unbound-variables] (classify-variables constraints)]
+  (let [[bound-variables _] (classify-variables constraints)]
     (into #{}
           (for [constraint constraints
                 :when (non-equality-unification? constraint bound-variables)]

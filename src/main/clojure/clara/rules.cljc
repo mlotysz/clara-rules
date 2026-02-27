@@ -427,9 +427,7 @@ See the [query authoring documentation](http://www.clara-rules.org/docs/queries/
     [name & body]
     (if (com/compiling-cljs?)
       `(clara.macros/defquery ~name ~@body)
-      (let [doc (if (string? (first body)) (first body) nil)
-            _binding (if doc (second body) (first body))
-            _definition (if doc (drop 2 body) (rest body) )]
+      (let [doc (if (string? (first body)) (first body) nil)]
         `(def ~(vary-meta name assoc :query true :doc doc)
            ~(dsl/build-query name body (meta &form)))))))
 
