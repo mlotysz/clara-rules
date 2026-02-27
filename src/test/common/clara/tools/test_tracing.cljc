@@ -98,10 +98,15 @@
                     (insert (->Temperature 80 "MCI"))
                     fire-rules)]
 
-    (is (= [:add-facts :alpha-activate :right-activate :accum-reduced
-            :left-activate :add-facts :alpha-activate :right-activate
-            :accum-reduced :left-retract :left-activate :add-facts
-            :alpha-activate :right-activate :accum-reduced]
+    ;; In PHREAK mode all alpha-dispatch events are batched before the pull
+    ;; phase runs, so the ordering differs from the standard (eager) path.
+    ;; Standard: interleaved per-fact (add-facts alpha-activate right-activate accum-reduced ...)
+    ;; PHREAK:   all add-facts/alpha-activate first, then beta events from the pull phase.
+    (is (= [:add-facts :alpha-activate :add-facts :alpha-activate
+            :add-facts :alpha-activate
+            :right-activate :accum-reduced :right-activate :accum-reduced
+            :right-activate :accum-reduced
+            :left-activate :left-retract :left-activate]
 
            (map :type (t/get-trace session))))))
 

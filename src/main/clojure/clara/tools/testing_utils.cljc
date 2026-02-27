@@ -79,15 +79,12 @@
 
 #?(:clj
    (defn opts-fixture
-     ;; Runs each test under three engine configurations:
-     ;;   1. Default ordered update cache (baseline).
-     ;;   2. CancellingUpdateCache — tests the cancelling path.
-     ;;   3. PHREAK delta-queue + pull-phase path.
+     ;; Runs each test under two engine configurations:
+     ;;   1. PHREAK delta-queue + pull-phase (default).
+     ;;   2. CancellingUpdateCache.
      [f]
      (f)
      (with-redefs [uc/get-ordered-update-cache ca/get-cancelling-update-cache]
-       (f))
-     (binding [eng/*additional-fire-rules-opts* {:use-phreak true}]
        (f))))
 
 (defn join-filter-equals

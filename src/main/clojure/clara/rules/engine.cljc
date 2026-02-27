@@ -2469,6 +2469,7 @@
           ;; element inserts → add to memory, generate tokens, push downstream
           (do
             (mem/add-elements! memory node join-bindings elems)
+            (l/right-activate! listener node elems)
             (send-tokens transport memory listener children
                          (into [] (map (fn [{:keys [fact bindings]}]
                                          (->Token [(match-pair fact node-id)] bindings)))
@@ -2476,6 +2477,7 @@
           ;; element retracts → remove from memory, retract corresponding tokens
           (let [removed (mem/remove-elements! memory node join-bindings elems)]
             (when (seq removed)
+              (l/right-retract! listener node removed)
               (retract-tokens transport memory listener children
                               (into [] (map (fn [{:keys [fact bindings]}]
                                               (->Token [(match-pair fact node-id)] bindings)))
@@ -2498,6 +2500,7 @@
         (if insert?
           (let [existing-tokens (mem/get-tokens memory node join-bindings)]
             (mem/add-elements! memory node join-bindings elems)
+            (l/right-activate! listener node elems)
             (when (seq existing-tokens)
               (send-tokens
                transport memory listener children
@@ -2515,6 +2518,8 @@
                          existing-tokens))))))
           (let [existing-tokens (mem/get-tokens memory node join-bindings)
                 removed (mem/remove-elements! memory node join-bindings elems)]
+            (when (seq removed)
+              (l/right-retract! listener node removed))
             (when (and (seq removed) (seq existing-tokens))
               (retract-tokens
                transport memory listener children
@@ -2537,6 +2542,7 @@
         (if insert?
           (do
             (mem/add-tokens! memory node join-bindings toks)
+            (l/left-activate! listener node toks)
             (let [elements (mem/get-elements memory node join-bindings)]
               (when (seq elements)
                 (send-tokens
@@ -2724,12 +2730,15 @@
       (letfn [(do-flush-and-pull []
                 ;; Flush any pending updates (from RHS inserts/retracts or
                 ;; logical retractions), then re-run the pull phase.
-                ;; Repeat until nothing new arrives.
-                (loop []
+                ;; Repeat until nothing new arrives.  Returns true if
+                ;; flush-updates processed at least one batch (mirrors the
+                ;; behaviour of flush-updates in the standard fire-rules* path).
+                (loop [flushed? false]
                   (run-pull-phase! beta-topo-order transient-memory delta-memory
                                    phreak-transport transient-listener)
-                  (when (flush-updates *current-session*)
-                    (recur))))]
+                  (if (flush-updates *current-session*)
+                    (recur true)
+                    flushed?)))]
 
         ;; Initial pull phase to process external insertions/retractions that
         ;; were queued before fire-rules-phreak* was called.
@@ -2810,10 +2819,11 @@
             ;; No activations — flush pending updates and pull; if new
             ;; activations appeared, loop again.
             (do
-              (do-flush-and-pull)
-              (let [upcoming-group (mem/next-activation-group transient-memory)]
+              (let [flushed        (do-flush-and-pull)
+                    upcoming-group (mem/next-activation-group transient-memory)]
+                (when (and (not null-listener) flushed)
+                  (l/activation-group-transition! transient-listener next-group upcoming-group))
                 (when upcoming-group
-                  (l/activation-group-transition! transient-listener next-group upcoming-group)
                   (recur upcoming-group next-group))))))))))
 
 ;;; End PHREAK section
@@ -2980,18 +2990,16 @@
   (fire-rules [session] (fire-rules session {}))
   (fire-rules [session opts]
 
-    ;; Merge in any dynamically-bound extra opts (e.g., {:use-phreak true}
-    ;; injected by opts-fixture for integration testing).
+    ;; Merge in any dynamically-bound extra opts.
     (let [opts (merge *additional-fire-rules-opts* opts)
           transient-memory (mem/to-transient memory)
           transient-listener (l/to-transient listener)]
 
       (cond
-        ;; ── PHREAK path ────────────────────────────────────────────────────
+        ;; ── PHREAK path (default) ──────────────────────────────────────────
         ;; Delta queues + pull phase instead of immediate eager cascade.
-        ;; Gate behind {:use-phreak true} AND only when :cancelling is not
-        ;; explicitly requested (cancelling semantics override PHREAK).
-        (and (:use-phreak opts) (not (:cancelling opts)))
+        ;; Active unless {:cancelling true} or {:use-eager true} are set.
+        (and (not (:cancelling opts)) (not (:use-eager opts)))
         (let [delta-memory     (dm/make-transient-delta-memory)
               phreak-transport (->DeltaTransport delta-memory)
               beta-topo-order  (compute-beta-topo-order (:beta-roots rulebase))
@@ -3017,7 +3025,7 @@
           (fire-rules-phreak* rulebase transient-memory phreak-transport transient-listener
                               get-alphas-fn update-cache beta-topo-order delta-memory))
 
-        ;; ── Standard eager path ────────────────────────────────────────────
+        ;; ── Standard eager path (opt-in via {:use-eager true}) ─────────────
         (not (:cancelling opts))
         ;; We originally performed insertions and retractions immediately after the insert and retract calls,
         ;; but this had the downside of making a pattern like "Retract facts, insert other facts, and fire the rules"
