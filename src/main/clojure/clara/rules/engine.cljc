@@ -2642,23 +2642,42 @@
 ;; ---------------------------------------------------------------------------
 ;; Pull-phase helpers
 
+(defn- max-downstream-salience
+  "Returns the highest salience found among all ProductionNodes reachable
+   from `node`.  Used to sort beta-roots so high-salience rules generate
+   activations earlier in the pull phase."
+  [node]
+  (let [visited (volatile! #{})
+        result  (volatile! 0)]
+    (letfn [(visit! [n]
+              (when-not (contains? @visited (:id n))
+                (vswap! visited conj (:id n))
+                (when (instance? ProductionNode n)
+                  (let [s (get-in n [:production :props :salience] 0)]
+                    (when (> s @result) (vreset! result s))))
+                (doseq [child (:children n)] (visit! child))))]
+      (visit! node))
+    @result))
+
 (defn- compute-beta-topo-order
-  "DFS pre-order traversal of the beta network from beta-roots.
-   Returns a vector of nodes in topological order (parents before children).
+  "DFS pre-order traversal of the beta network from beta-roots, sorted by
+   descending max downstream salience so high-salience rules generate
+   activations earlier in the pull phase.
    For tree topologies (the common case) this is a strict topo sort.
    For DAGs a node may appear once; if a second parent is processed later
    the node will be marked dirty again and re-evaluated in the next pass of
    the pull-phase loop — the loop converges to a quiescent state."
   [beta-roots]
-  (let [visited (volatile! #{})
-        result  (volatile! (transient []))]
+  (let [visited      (volatile! #{})
+        result       (volatile! (transient []))
+        sorted-roots (sort-by #(- (max-downstream-salience %)) beta-roots)]
     (letfn [(visit! [node]
               (when-not (contains? @visited (:id node))
                 (vswap! visited conj (:id node))
                 (vswap! result  conj! node)
                 (doseq [child (:children node)]
                   (visit! child))))]
-      (doseq [root beta-roots]
+      (doseq [root sorted-roots]
         (visit! root)))
     (persistent! @result)))
 
