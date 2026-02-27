@@ -175,6 +175,27 @@ clojure -M:cljs-test -m cljs-build simple   # Compile CLJS tests
 node target/js/test-simple.js               # Run CLJS tests
 ----
 
+
+== Releasing
+
+The `release` build task creates a git tag for the current version and installs the JAR to the local Maven repository (`~/.m2`).
+
+[source,bash]
+----
+# Tag HEAD with the latest git tag and install to local ~/.m2
+clojure -T:build release
+
+# Override the version explicitly
+clojure -T:build release :version '"1.2.3"'
+----
+
+The version resolves in this order:
+
+1. `:version` argument passed on the command line
+2. Latest git tag (`git describe --tags --abbrev=0`)
+
+`jar` and `install` also accept an optional `:version` argument via the same mechanism.
+
 == Community
 
 Questions about Clara Rules can be posted to the https://groups.google.com/forum/?hl=en#!forum/clara-rules[Google Group] or the https://clojurians.slack.com/messages/clara/[#clara Slack channel] on Clojurians.
