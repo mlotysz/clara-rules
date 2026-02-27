@@ -11,10 +11,15 @@
    if we use separate insert/retract maps, so we preserve the original order as
    an ordered list of [insert? join-bindings elements] triples.
 
-   Structure of each mutable field:
-     elem-ops  volatile! {node-id -> [[insert? join-bindings [Element]]]}
-     tok-ops   volatile! {node-id -> [[insert? join-bindings [Token]]]}
-     dirty     volatile! #{node-id}")
+   Mutable backing stores:
+     CLJ  — java.util.HashMap (node-id → java.util.ArrayList of op tuples)
+              + java.util.HashSet for the dirty set.
+     CLJS — goog.object map (node-id-str → persistent vector of op tuples)
+              + js/Set for the dirty set.
+   Op tuples remain Clojure vectors so consume sites can use
+   (doseq [[insert? join-bindings elems] ops] ...) without change."
+  #?(:cljs (:require [goog.object :as gobject]))
+  #?(:clj  (:import [java.util ArrayList HashMap HashSet])))
 
 (defprotocol IDeltaMemory
   "Mutable accumulator for incremental (delta) changes during the PHREAK pull phase."
@@ -55,46 +60,72 @@
 ;; TransientDeltaMemory
 
 (deftype TransientDeltaMemory
-  [elem-ops   ;; volatile! {node-id -> [[insert? join-bindings [Element]]]}
-   tok-ops    ;; volatile! {node-id -> [[insert? join-bindings [Token]]]}
-   dirty]     ;; volatile! #{node-id}
+  [elem-ops   ;; CLJ: HashMap<node-id, ArrayList<op-tuple>>  CLJS: goog.object map
+   tok-ops    ;; CLJ: HashMap<node-id, ArrayList<op-tuple>>  CLJS: goog.object map
+   dirty]     ;; CLJ: HashSet<node-id>                       CLJS: js/Set
 
   IDeltaMemory
 
   (add-element-op! [_ node-id join-bindings elements insert?]
-    (vswap! elem-ops update node-id
-            (fn [ops] (conj (or ops []) [insert? join-bindings elements]))))
+    #?(:clj  (let [^HashMap m elem-ops
+                   ^ArrayList al (or (.get m node-id)
+                                     (let [a (ArrayList.)]
+                                       (.put m node-id a)
+                                       a))]
+               (.add al [insert? join-bindings elements]))
+       :cljs (let [k (str node-id)]
+               (gobject/set elem-ops k
+                            (conj (or (gobject/get elem-ops k) [])
+                                  [insert? join-bindings elements])))))
 
   (get-element-ops [_ node-id]
-    (or (get @elem-ops node-id) []))
+    #?(:clj  (let [^ArrayList al (.get ^HashMap elem-ops node-id)]
+               (if al (seq al) []))
+       :cljs (or (gobject/get elem-ops (str node-id)) [])))
 
   (add-token-op! [_ node-id join-bindings tokens insert?]
-    (vswap! tok-ops update node-id
-            (fn [ops] (conj (or ops []) [insert? join-bindings tokens]))))
+    #?(:clj  (let [^HashMap m tok-ops
+                   ^ArrayList al (or (.get m node-id)
+                                     (let [a (ArrayList.)]
+                                       (.put m node-id a)
+                                       a))]
+               (.add al [insert? join-bindings tokens]))
+       :cljs (let [k (str node-id)]
+               (gobject/set tok-ops k
+                            (conj (or (gobject/get tok-ops k) [])
+                                  [insert? join-bindings tokens])))))
 
   (get-token-ops [_ node-id]
-    (or (get @tok-ops node-id) []))
+    #?(:clj  (let [^ArrayList al (.get ^HashMap tok-ops node-id)]
+               (if al (seq al) []))
+       :cljs (or (gobject/get tok-ops (str node-id)) [])))
 
   (dirty? [_ node-id]
-    (contains? @dirty node-id))
+    #?(:clj  (.contains ^HashSet dirty node-id)
+       :cljs (.has ^js dirty node-id)))
 
   (mark-dirty! [_ node-id]
-    (vswap! dirty conj node-id))
+    #?(:clj  (.add ^HashSet dirty node-id)
+       :cljs (.add ^js dirty node-id)))
 
   (clear-dirty! [_ node-id]
-    (vswap! dirty disj node-id)
-    (vswap! elem-ops dissoc node-id)
-    (vswap! tok-ops  dissoc node-id))
+    #?(:clj  (do (.remove ^HashSet dirty node-id)
+                 (.remove ^HashMap elem-ops node-id)
+                 (.remove ^HashMap tok-ops node-id))
+       :cljs (do (.delete ^js dirty node-id)
+                 (gobject/remove elem-ops (str node-id))
+                 (gobject/remove tok-ops (str node-id)))))
 
   (any-dirty? [_]
-    (seq @dirty))
+    #?(:clj  (not (.isEmpty ^HashSet dirty))
+       :cljs (pos? (.-size ^js dirty))))
 
   (get-dirty-nodes [_]
-    @dirty))
+    #?(:clj  (set dirty)
+       :cljs (into #{} (.values ^js dirty)))))
 
 (defn make-transient-delta-memory
-  "Construct a fresh TransientDeltaMemory."
+  "Construct a fresh TransientDeltaMemory backed by mutable Java/JS collections."
   []
-  (->TransientDeltaMemory (volatile! {})
-                          (volatile! {})
-                          (volatile! #{})))
+  #?(:clj  (->TransientDeltaMemory (HashMap.) (HashMap.) (HashSet.))
+     :cljs (->TransientDeltaMemory (js-obj) (js-obj) (js/Set.))))

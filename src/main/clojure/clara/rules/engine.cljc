@@ -2283,7 +2283,7 @@
             :when (not= ::mem/no-accum-reduced previous-candidates)
 
             :let [facts (mapv :fact elements)
-                  new-candidates (second (mem/remove-first-of-each facts previous-candidates))]]
+                  [removed-candidates new-candidates] (mem/remove-first-of-each facts previous-candidates)]]
 
       ;; Add the new candidates to our node.
       (l/add-accum-reduced! listener node join-bindings new-candidates bindings)
@@ -2292,38 +2292,44 @@
       (doseq [;; Get all of the previously matched tokens so we can retract and re-send them.
               token matched-tokens
 
-              :let [previous-facts (filter-accum-facts node join-filter-fn token previous-candidates bindings)
+              :let [previous-facts   (filter-accum-facts node join-filter-fn token previous-candidates bindings)
+                    retract-fn       (:retract-fn accumulator)
+                    ;; When retract-fn is present and some candidates remain, compute which of the
+                    ;; removed candidates pass the join filter.  This lets us apply retract-fn
+                    ;; incrementally instead of re-accumulating from scratch.
+                    removed-matching (when (and retract-fn (seq new-candidates))
+                                       (filter-accum-facts node join-filter-fn token removed-candidates bindings))
+                    ;; Only compute new-facts on the original path (no retract-fn or all candidates gone).
+                    new-facts        (when-not removed-matching
+                                       (filter-accum-facts node join-filter-fn token new-candidates bindings))]
 
-                    new-facts (filter-accum-facts node join-filter-fn token new-candidates bindings)]
-
-              ;; The previous matching elements are a superset of the matching elements after retraction.
-              ;; Therefore, if the counts before and after are equal nothing retracted actually matched
-              ;; and we don't need to do anything else here since the end result shouldn't change.
-              :when (not= (count previous-facts)
-                          (count new-facts))
+              ;; Guard: something changed that passed the join filter.
+              ;; Incremental path: at least one removed candidate matched the filter.
+              ;; Original path: count changed (previous is a superset of new after retraction).
+              :when (if removed-matching
+                      (seq removed-matching)
+                      (not= (count previous-facts) (count new-facts)))
 
               :let [;; We know from the check above that matching elements existed previously,
                     ;; since if there were no previous matching elements the count of matching
                     ;; elements before and after a right-retraction cannot be different.
                     previous-result (do-accumulate accumulator previous-facts)
 
-                    ;; TODO: Can we use the retract-fn here if present to improve performance?  We'd also potentially
-                    ;; avoid needing to filter facts twice above, since elements present both before and after retraction
-                    ;; will given to the join-filter-fn twice (once when creating previous-facts and once when creating new-facts).
-                    ;; Note that any future optimizations here must ensure that the result propagated here is equal to the result
-                    ;; that will be recreated as the previous result in right activate, and that this can be dependent on the order
-                    ;; of candidates in the memory, since, for example (acc/all) can return both [A B] and [B A] but these are not equal.
+                    new-result (if removed-matching
+                                 ;; Incremental path: apply retract-fn to each removed matching fact.
+                                 ;; Avoids a full re-accumulate when only a few facts were retracted.
+                                 (r/reduce retract-fn previous-result removed-matching)
+                                 ;; Original path: re-accumulate from remaining facts, or use
+                                 ;; initial-value/nil when all candidates are gone.
+                                 (cond
+                                   (seq new-facts)
+                                   (do-accumulate accumulator new-facts)
 
-                    new-result (cond
+                                   (and (-> accumulator :initial-value some?)
+                                        (empty? new-bindings))
+                                   (:initial-value accumulator)
 
-                                 (seq new-facts)
-                                 (do-accumulate accumulator new-facts)
-
-                                 (and (-> accumulator :initial-value some?)
-                                      (empty? new-bindings))
-                                 (:initial-value accumulator)
-
-                                 :else nil)
+                                   :else nil))
 
                     previous-converted (when (some? previous-result)
                                          (convert-return-fn previous-result))
