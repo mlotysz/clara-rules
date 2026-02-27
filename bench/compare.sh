@@ -12,8 +12,8 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-FORK_OUT="$REPO_DIR/bench/results-fork.txt"
-ORACLE_OUT="$REPO_DIR/bench/results-oracle.txt"
+FORK_OUT="${BENCH_OUT:-$REPO_DIR/bench/results-fork.txt}"
+ORACLE_OUT="${ORACLE_OUT_FILE:-$REPO_DIR/bench/01-oracle.txt}"
 ORACLE_VERSION="${ORACLE_VERSION:-0.24.0}"
 
 export BENCH_N="${BENCH_N:-100000}"
@@ -104,5 +104,5 @@ PYEOF
 
 echo ""
 echo "  < = fork faster   > = fork slower"
-echo "  Results: $FORK_OUT"
-echo "           $ORACLE_OUT"
+echo "  Results saved to: $FORK_OUT"
+echo "  Oracle baseline:  $ORACLE_OUT"

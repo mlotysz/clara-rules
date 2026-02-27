@@ -4,12 +4,33 @@
 
 50 scenarios, up to 100k facts. Measures fork performance vs `com.cerner/clara-rules` oracle release.
 
+== Result Files
+
+Numbered result snapshots are kept in this directory for historical comparison:
+
+[cols="1,3"]
+|===
+| File | Description
+
+| `01-oracle.txt`
+| Baseline: `com.cerner/clara-rules` 0.24.0 released JAR
+
+| `02-optimizations.txt`
+| Fork after Phases 1–3.1: all micro-optimizations (alpha network, beta joins, negation sub-indexing, PHREAK demand-pull)
+
+| `03-phreak.txt`
+| Fork after Phase 3.2: full PHREAK delta propagation (delta queues + pull phase, gated behind `:use-phreak true`)
+|===
+
 == Running
 
 [source,bash]
 ----
 # Full comparison (fork vs oracle 0.24.0)
 bash bench/compare.sh
+
+# Save fork results to a specific file (e.g. when capturing a new snapshot)
+BENCH_OUT=bench/03-phreak.txt bash bench/compare.sh
 
 # Specific scenarios only
 BENCH_ONLY=11,12,13 bash bench/compare.sh
@@ -31,6 +52,8 @@ BENCH_N=10000 BENCH_ONLY=11,12,13 clojure -M:bench
 | `BENCH_ITERS` | Iterations per scenario | 2
 | `BENCH_ONLY` | Comma-separated scenario IDs to run | all
 | `ORACLE_VERSION` | Oracle JAR version | 0.24.0
+| `BENCH_OUT` | Fork output file path | `results-fork.txt`
+| `ORACLE_OUT_FILE` | Oracle baseline file | `01-oracle.txt`
 |===
 
 == Scenario Groups

@@ -8,6 +8,7 @@
             #?(:clj [clara.rules.platform :as platform]
                :cljs [clara.rules.platform :as platform :include-macros true])
             [clara.rules.update-cache.core :as uc]
+            [clara.rules.delta-memory :as dm]
             #?(:clj [clara.rules.update-cache.cancelling :as ca])))
 
 ;; The accumulator is a Rete extension to run an accumulation (such as sum, average, or similar operation)
@@ -201,6 +202,42 @@
   (retract-tokens [transport memory listener nodes tokens]
     (propagate-items-to-nodes transport memory listener nodes tokens left-retract)))
 
+;; PHREAK: protocol for pull-phase evaluation of queued delta updates.
+(defprotocol IDeltaEvaluate
+  "Called during the PHREAK pull phase to drain queued element/token deltas for a node,
+   update working memory, compute downstream token deltas, and queue them to children
+   via the DeltaTransport rather than cascading immediately."
+  (evaluate-delta [node memory delta-memory transport listener]))
+
+;; PHREAK: transport that queues deltas instead of cascading immediately.
+;; All send-*/retract-* calls record the delta in delta-memory and mark the
+;; target nodes dirty; actual evaluation happens in the pull phase.
+(deftype DeltaTransport [delta-memory]
+  ITransport
+  (send-elements [transport memory listener nodes elements]
+    (propagate-items-to-nodes transport memory listener nodes elements
+                              (fn [node join-bindings elems _mem _t _l]
+                                (dm/add-element-op! delta-memory (:id node) join-bindings elems true)
+                                (dm/mark-dirty! delta-memory (:id node)))))
+
+  (send-tokens [transport memory listener nodes tokens]
+    (propagate-items-to-nodes transport memory listener nodes tokens
+                              (fn [node join-bindings toks _mem _t _l]
+                                (dm/add-token-op! delta-memory (:id node) join-bindings toks true)
+                                (dm/mark-dirty! delta-memory (:id node)))))
+
+  (retract-elements [transport memory listener nodes elements]
+    (propagate-items-to-nodes transport memory listener nodes elements
+                              (fn [node join-bindings elems _mem _t _l]
+                                (dm/add-element-op! delta-memory (:id node) join-bindings elems false)
+                                (dm/mark-dirty! delta-memory (:id node)))))
+
+  (retract-tokens [transport memory listener nodes tokens]
+    (propagate-items-to-nodes transport memory listener nodes tokens
+                              (fn [node join-bindings toks _mem _t _l]
+                                (dm/add-token-op! delta-memory (:id node) join-bindings toks false)
+                                (dm/mark-dirty! delta-memory (:id node))))))
+
 ;; Protocol for activation of Rete alpha nodes.
 (defprotocol IAlphaActivate
   (alpha-activate [node facts memory transport listener])
@@ -236,6 +273,11 @@
 
 ;; Active session during rule execution.
 (def ^:dynamic *current-session* nil)
+
+;; When bound, this map is merged into every fire-rules opts call.
+;; Intended for test fixtures that need to exercise alternate engine paths
+;; (e.g., {:use-phreak true}) without modifying call sites.
+(def ^:dynamic *additional-fire-rules-opts* {})
 
 ;; Note that this can hold facts directly retracted and facts logically retracted
 ;; as a result of an external retraction or insertion.
@@ -2367,7 +2409,372 @@
 
 ;; Record for the per-activation rule context, replacing a per-activation map allocation.
 ;; Supports keyword lookup, destructuring, and get-in — fully compatible with all access patterns.
+;; Defined here (before the PHREAK section) so fire-rules-phreak* can use ->RuleContext.
 (defrecord RuleContext [token node batched-logical-insertions batched-unconditional-insertions batched-rhs-retractions])
+
+;;; ============================================================
+;;; PHREAK Phase 3.2 — Delta evaluation (pull phase)
+;;;
+;;; Each IDeltaEvaluate implementation:
+;;;   1. Reads its element/token deltas from delta-memory.
+;;;   2. Applies them to working memory.
+;;;   3. Computes downstream token inserts/retracts.
+;;;   4. Sends them via DeltaTransport (which queues rather
+;;;      than cascades) so children are marked dirty and
+;;;      evaluated later in the same pull-phase pass.
+;;;
+;;; Ordering contract: element deltas are processed before token
+;;; deltas.  This means that when a token delta is processed the
+;;; element memory is already up to date, so the join against
+;;; existing elements produces the correct result without
+;;; double-counting new-element × new-token pairs.
+;;; ============================================================
+
+;; ---------------------------------------------------------------------------
+;; RootJoinNode — converts element deltas into token deltas for children.
+;; No left/token side; the empty token is implicit.
+
+(extend-type RootJoinNode
+  IDeltaEvaluate
+  (evaluate-delta [node memory delta-memory transport listener]
+    (let [node-id  (:id node)
+          children (:children node)]
+      ;; Process element ops in ARRIVAL ORDER to preserve insert/retract semantics.
+      (doseq [[insert? join-bindings elems] (dm/get-element-ops delta-memory node-id)]
+        (if insert?
+          ;; element inserts → add to memory, generate tokens, push downstream
+          (do
+            (mem/add-elements! memory node join-bindings elems)
+            (send-tokens transport memory listener children
+                         (into [] (map (fn [{:keys [fact bindings]}]
+                                         (->Token [(match-pair fact node-id)] bindings)))
+                               elems)))
+          ;; element retracts → remove from memory, retract corresponding tokens
+          (let [removed (mem/remove-elements! memory node join-bindings elems)]
+            (when (seq removed)
+              (retract-tokens transport memory listener children
+                              (into [] (map (fn [{:keys [fact bindings]}]
+                                              (->Token [(match-pair fact node-id)] bindings)))
+                                    removed)))))))))
+
+;; ---------------------------------------------------------------------------
+;; HashJoinNode — custom evaluate-delta that avoids the demand-pull logic
+;; present in right-activate (which would add tokens to regular memory before
+;; the token-delta pass, causing duplicates when left-activate is later called).
+
+(extend-type HashJoinNode
+  IDeltaEvaluate
+  (evaluate-delta [node memory delta-memory transport listener]
+    (let [node-id  (:id node)
+          children (:children node)]
+
+      ;; 1. Element ops in ARRIVAL ORDER: join with existing tokens.
+      ;;    Token ops not yet in regular memory → no overlap.
+      (doseq [[insert? join-bindings elems] (dm/get-element-ops delta-memory node-id)]
+        (if insert?
+          (let [existing-tokens (mem/get-tokens memory node join-bindings)]
+            (mem/add-elements! memory node join-bindings elems)
+            (when (seq existing-tokens)
+              (send-tokens
+               transport memory listener children
+               (if (next elems)
+                 (platform/eager-for [{:keys [fact bindings]} elems
+                                      :let [mp (match-pair fact node-id)]
+                                      token existing-tokens]
+                                     (->Token (conj (:matches token) mp)
+                                              (conj (:bindings token) bindings)))
+                 (let [{:keys [fact bindings]} (first elems)
+                       mp (match-pair fact node-id)]
+                   (into [] (map (fn [token]
+                                   (->Token (conj (:matches token) mp)
+                                            (conj (:bindings token) bindings))))
+                         existing-tokens))))))
+          (let [existing-tokens (mem/get-tokens memory node join-bindings)
+                removed (mem/remove-elements! memory node join-bindings elems)]
+            (when (and (seq removed) (seq existing-tokens))
+              (retract-tokens
+               transport memory listener children
+               (if (next removed)
+                 (platform/eager-for [{:keys [fact bindings]} removed
+                                      :let [mp (match-pair fact node-id)]
+                                      token existing-tokens]
+                                     (->Token (conj (:matches token) mp)
+                                              (conj (:bindings token) bindings)))
+                 (let [{:keys [fact bindings]} (first removed)
+                       mp (match-pair fact node-id)]
+                   (into [] (map (fn [token]
+                                   (->Token (conj (:matches token) mp)
+                                            (conj (:bindings token) bindings))))
+                         existing-tokens))))))))
+
+      ;; 2. Token ops in ARRIVAL ORDER: join with CURRENT elements
+      ;;    (element memory already updated in step 1).
+      (doseq [[insert? join-bindings toks] (dm/get-token-ops delta-memory node-id)]
+        (if insert?
+          (do
+            (mem/add-tokens! memory node join-bindings toks)
+            (let [elements (mem/get-elements memory node join-bindings)]
+              (when (seq elements)
+                (send-tokens
+                 transport memory listener children
+                 (if (next toks)
+                   (platform/eager-for [elem elements
+                                        :let [fact (:fact elem)
+                                              fb   (:bindings elem)
+                                              mp   (match-pair fact node-id)]
+                                        token toks]
+                                       (->Token (conj (:matches token) mp)
+                                                (conj (:bindings token) fb)))
+                   (let [token (first toks)]
+                     (into [] (map (fn [elem]
+                                     (->Token (conj (:matches token)
+                                                    (match-pair (:fact elem) node-id))
+                                              (conj (:bindings token) (:bindings elem)))))
+                           elements)))))))
+          (let [removed  (mem/remove-tokens! memory node join-bindings toks)
+                elements (mem/get-elements memory node join-bindings)]
+            (when (and (seq removed) (seq elements))
+              (retract-tokens
+               transport memory listener children
+               (if (next removed)
+                 (platform/eager-for [elem elements
+                                      :let [fact (:fact elem)
+                                            fb   (:bindings elem)
+                                            mp   (match-pair fact node-id)]
+                                      token removed]
+                                     (->Token (conj (:matches token) mp)
+                                              (conj (:bindings token) fb)))
+                 (let [token (first removed)]
+                   (into [] (map (fn [elem]
+                                   (->Token (conj (:matches token)
+                                                  (match-pair (:fact elem) node-id))
+                                            (conj (:bindings token) (:bindings elem)))))
+                         elements)))))))))))
+
+;; ---------------------------------------------------------------------------
+;; Helper: generic evaluate-delta that delegates to the node's existing
+;; ILeftActivate / IRightActivate methods (which already use transport for
+;; downstream propagation).  Works correctly for any node type whose
+;; right-activate/left-activate methods do NOT contain demand-pull logic.
+
+(defn- default-evaluate-delta
+  "Generic evaluate-delta: drain element/token ops (in arrival order) and call
+   the node's existing right-activate, right-retract, left-activate, left-retract
+   methods.  Element ops are processed before token ops so element memory is
+   up to date when token joins run."
+  [node memory delta-memory transport listener]
+  (let [node-id (:id node)]
+    (doseq [[insert? join-bindings elems] (dm/get-element-ops delta-memory node-id)]
+      (if insert?
+        (right-activate node join-bindings elems memory transport listener)
+        (right-retract  node join-bindings elems memory transport listener)))
+    (doseq [[insert? join-bindings toks] (dm/get-token-ops delta-memory node-id)]
+      (if insert?
+        (left-activate node join-bindings toks memory transport listener)
+        (left-retract  node join-bindings toks memory transport listener)))))
+
+;; All remaining node types use the generic delegate:
+
+(extend-type ExpressionJoinNode
+  IDeltaEvaluate
+  (evaluate-delta [node memory delta-memory transport listener]
+    (default-evaluate-delta node memory delta-memory transport listener)))
+
+(extend-type TestNode
+  IDeltaEvaluate
+  (evaluate-delta [node memory delta-memory transport listener]
+    (default-evaluate-delta node memory delta-memory transport listener)))
+
+(extend-type NegationNode
+  IDeltaEvaluate
+  (evaluate-delta [node memory delta-memory transport listener]
+    (default-evaluate-delta node memory delta-memory transport listener)))
+
+(extend-type NegationWithJoinFilterNode
+  IDeltaEvaluate
+  (evaluate-delta [node memory delta-memory transport listener]
+    (default-evaluate-delta node memory delta-memory transport listener)))
+
+(extend-type AccumulateNode
+  IDeltaEvaluate
+  (evaluate-delta [node memory delta-memory transport listener]
+    (default-evaluate-delta node memory delta-memory transport listener)))
+
+(extend-type AccumulateWithJoinFilterNode
+  IDeltaEvaluate
+  (evaluate-delta [node memory delta-memory transport listener]
+    (default-evaluate-delta node memory delta-memory transport listener)))
+
+(extend-type ProductionNode
+  IDeltaEvaluate
+  (evaluate-delta [node memory delta-memory transport listener]
+    (default-evaluate-delta node memory delta-memory transport listener)))
+
+(extend-type QueryNode
+  IDeltaEvaluate
+  (evaluate-delta [node memory delta-memory transport listener]
+    (default-evaluate-delta node memory delta-memory transport listener)))
+
+;; ---------------------------------------------------------------------------
+;; Pull-phase helpers
+
+(defn- compute-beta-topo-order
+  "DFS pre-order traversal of the beta network from beta-roots.
+   Returns a vector of nodes in topological order (parents before children).
+   For tree topologies (the common case) this is a strict topo sort.
+   For DAGs a node may appear once; if a second parent is processed later
+   the node will be marked dirty again and re-evaluated in the next pass of
+   the pull-phase loop — the loop converges to a quiescent state."
+  [beta-roots]
+  (let [visited (volatile! #{})
+        result  (volatile! (transient []))]
+    (letfn [(visit! [node]
+              (when-not (contains? @visited (:id node))
+                (vswap! visited conj (:id node))
+                (vswap! result  conj! node)
+                (doseq [child (:children node)]
+                  (visit! child))))]
+      (doseq [root beta-roots]
+        (visit! root)))
+    (persistent! @result)))
+
+(defn- run-pull-phase!
+  "Evaluate every dirty node in topological order, then repeat until quiescent.
+   Using DFS pre-order topo-order means children are always processed after
+   their parents, so token deltas flow naturally in a single pass for trees.
+   The outer loop handles the rare DAG case where a node is dirtied again
+   after it has already been processed in the current pass."
+  [beta-topo-order memory delta-memory transport listener]
+  (loop []
+    (when (dm/any-dirty? delta-memory)
+      (doseq [node beta-topo-order
+              :when (dm/dirty? delta-memory (:id node))]
+        (evaluate-delta node memory delta-memory transport listener)
+        (dm/clear-dirty! delta-memory (:id node)))
+      (recur))))
+
+;; ---------------------------------------------------------------------------
+;; PHREAK fire-rules* — pull-phase loop + rule firing
+
+(defn- fire-rules-phreak*
+  "PHREAK-style rule firing: after each batch of alpha activations the pull
+   phase evaluates dirty nodes top-down, then the fire loop fires any
+   activations that were produced, processes inserts/retracts from the RHS,
+   re-runs the pull phase, and continues until quiescent."
+  [rulebase transient-memory phreak-transport transient-listener
+   get-alphas-fn update-cache beta-topo-order delta-memory]
+  (let [batched-logical-insertions      (volatile! [])
+        batched-unconditional-insertions (volatile! [])
+        batched-rhs-retractions          (volatile! [])
+        rule-context                     (volatile! nil)
+        null-listener                    (l/null-listener? transient-listener)]
+
+    (binding [*current-session* {:rulebase         rulebase
+                                 :transient-memory transient-memory
+                                 :transport        phreak-transport
+                                 :insertions       (volatile! 0)
+                                 :get-alphas-fn    get-alphas-fn
+                                 :pending-updates  update-cache
+                                 :listener         transient-listener
+                                 :rule-context     rule-context}]
+
+      (letfn [(do-flush-and-pull []
+                ;; Flush any pending updates (from RHS inserts/retracts or
+                ;; logical retractions), then re-run the pull phase.
+                ;; Repeat until nothing new arrives.
+                (loop []
+                  (run-pull-phase! beta-topo-order transient-memory delta-memory
+                                   phreak-transport transient-listener)
+                  (when (flush-updates *current-session*)
+                    (recur))))]
+
+        ;; Initial pull phase to process external insertions/retractions that
+        ;; were queued before fire-rules-phreak* was called.
+        (do-flush-and-pull)
+
+        (loop [next-group (mem/next-activation-group transient-memory)
+               last-group nil]
+
+          (if next-group
+
+            (if (and last-group (not= last-group next-group))
+              ;; Group boundary — flush and pull before continuing.
+              (do
+                (do-flush-and-pull)
+                (let [upcoming-group (mem/next-activation-group transient-memory)]
+                  (l/activation-group-transition! transient-listener next-group upcoming-group)
+                  (recur upcoming-group next-group)))
+
+              (do
+                ;; Fire one activation if available.
+                (when-let [{:keys [node token] :as activation}
+                           (mem/pop-activation! transient-memory)]
+                  (vreset! batched-logical-insertions      [])
+                  (vreset! batched-unconditional-insertions [])
+                  (vreset! batched-rhs-retractions          [])
+                  (vreset! rule-context
+                           (->RuleContext token node
+                                         batched-logical-insertions
+                                         batched-unconditional-insertions
+                                         batched-rhs-retractions))
+
+                  (try
+                    ((:rhs node) token (:env (:production node)))
+                    (let [retrieved-unconditional @batched-unconditional-insertions
+                          retrieved-logical       @batched-logical-insertions
+                          retrieved-retractions   @batched-rhs-retractions]
+                      (when-not null-listener
+                        (l/fire-activation! transient-listener activation
+                                            {:unconditional-insertions retrieved-unconditional
+                                             :logical-insertions       retrieved-logical
+                                             :rhs-retractions          retrieved-retractions}))
+                      (when-let [batched (seq retrieved-unconditional)]
+                        (flush-insertions! batched true))
+                      (when-let [batched (seq retrieved-logical)]
+                        (flush-insertions! batched false))
+                      (when-let [batched (seq retrieved-retractions)]
+                        (flush-rhs-retractions! batched)))
+                    (catch #?(:clj Exception :cljs :default) e
+                      (let [production (:production node)
+                            rule-name  (:name production)
+                            rhs        (:rhs production)]
+                        (throw (ex-info (str "Exception in "
+                                             (if rule-name rule-name (pr-str rhs))
+                                             " with bindings "
+                                             (pr-str (:bindings token)))
+                                        {:bindings (:bindings token)
+                                         :name     rule-name
+                                         :rhs      rhs
+                                         :batched-logical-insertions      @batched-logical-insertions
+                                         :batched-unconditional-insertions @batched-unconditional-insertions
+                                         :batched-rhs-retractions          @batched-rhs-retractions
+                                         :listeners
+                                         (try
+                                           (let [p-listener (l/to-persistent! transient-listener)]
+                                             (if (l/null-listener? p-listener)
+                                               []
+                                               (l/get-children p-listener)))
+                                           (catch #?(:clj Exception :cljs :default)
+                                               listener-exception
+                                             listener-exception))}
+                                        e)))))
+
+                  (when (some-> node :production :props :no-loop)
+                    (flush-updates *current-session*)))
+
+                (recur (mem/next-activation-group transient-memory) next-group)))
+
+            ;; No activations — flush pending updates and pull; if new
+            ;; activations appeared, loop again.
+            (do
+              (do-flush-and-pull)
+              (let [upcoming-group (mem/next-activation-group transient-memory)]
+                (when upcoming-group
+                  (l/activation-group-transition! transient-listener next-group upcoming-group)
+                  (recur upcoming-group next-group))))))))))
+
+;;; End PHREAK section
+;;; ============================================================
 
 (defn fire-rules*
   "Fire rules for the given nodes."
@@ -2530,10 +2937,45 @@
   (fire-rules [session] (fire-rules session {}))
   (fire-rules [session opts]
 
-    (let [transient-memory (mem/to-transient memory)
+    ;; Merge in any dynamically-bound extra opts (e.g., {:use-phreak true}
+    ;; injected by opts-fixture for integration testing).
+    (let [opts (merge *additional-fire-rules-opts* opts)
+          transient-memory (mem/to-transient memory)
           transient-listener (l/to-transient listener)]
 
-      (if-not (:cancelling opts)
+      (cond
+        ;; ── PHREAK path ────────────────────────────────────────────────────
+        ;; Delta queues + pull phase instead of immediate eager cascade.
+        ;; Gate behind {:use-phreak true} AND only when :cancelling is not
+        ;; explicitly requested (cancelling semantics override PHREAK).
+        (and (:use-phreak opts) (not (:cancelling opts)))
+        (let [delta-memory     (dm/make-transient-delta-memory)
+              phreak-transport (->DeltaTransport delta-memory)
+              beta-topo-order  (compute-beta-topo-order (:beta-roots rulebase))
+              update-cache     (uc/get-ordered-update-cache)]
+          ;; Route external ops through DeltaTransport — this only queues
+          ;; element deltas and marks nodes dirty; no immediate cascade.
+          ;; Truth-maintenance cascades arising from these insertions are
+          ;; handled by the pull phase inside fire-rules-phreak*.
+          (doseq [{op-type :type facts :facts} pending-operations]
+            (case op-type
+              :insertion
+              (do
+                (l/insert-facts! transient-listener nil nil facts)
+                (doseq [[alpha-roots fact-group] (get-alphas-fn facts)
+                        root alpha-roots]
+                  (alpha-activate root fact-group transient-memory phreak-transport transient-listener)))
+              :retraction
+              (do
+                (l/retract-facts! transient-listener nil nil facts)
+                (doseq [[alpha-roots fact-group] (get-alphas-fn facts)
+                        root alpha-roots]
+                  (alpha-retract root fact-group transient-memory phreak-transport transient-listener)))))
+          (fire-rules-phreak* rulebase transient-memory phreak-transport transient-listener
+                              get-alphas-fn update-cache beta-topo-order delta-memory))
+
+        ;; ── Standard eager path ────────────────────────────────────────────
+        (not (:cancelling opts))
         ;; We originally performed insertions and retractions immediately after the insert and retract calls,
         ;; but this had the downside of making a pattern like "Retract facts, insert other facts, and fire the rules"
         ;; perform at least three transitions between a persistent and transient memory.  Delaying the actual execution
@@ -2578,6 +3020,8 @@
                        get-alphas-fn
                        (uc/get-ordered-update-cache)))
 
+        ;; ── Cancelling (CAS-based) path ────────────────────────────────────
+        :else
         #?(:cljs (throw (ex-info "The :cancelling option is not supported in ClojureScript"
                                  {:session session :opts opts}))
 

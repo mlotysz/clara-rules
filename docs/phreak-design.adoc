@@ -37,12 +37,12 @@ PHREAK combines two planned optimizations into a single coherent architecture:
 |3.1
 |Demand-pull token generation
 |The **pull model** -- defer token creation at RootJoinNode, generate on demand when elements arrive
-|**Partial** -- implemented at RootJoinNode → HashJoinNode boundary only
+|**Done** -- implemented at RootJoinNode → HashJoinNode boundary
 
 |3.2
 |Incremental truth maintenance (delta propagation)
 |The **delta model** -- propagate only changes, not full re-derivation
-|**Proposed** -- not yet implemented
+|**Done** -- opt-in via `:use-phreak true` in `fire-rules`
 |===
 
 These are tightly coupled: PHREAK's lazy evaluation naturally uses delta propagation.
@@ -78,9 +78,12 @@ Implementing them together means one refactor of the core engine instead of two 
 Every call to `right-activate` or `left-activate` triggers a synchronous cascade through the entire downstream subgraph.
 The only batching points are the `OrderedUpdateCache` (between salience groups) and `*pending-external-retractions*` (for cascading retractions).
 
-**Partial exception (Phase 3.1 — implemented):** `RootJoinNode` defers token creation when all its `HashJoinNode` children have `:left-parent-id` set and their alpha-memory is empty.
+**Phase 3.1 (done):** `RootJoinNode` defers token creation when all its `HashJoinNode` children have `:left-parent-id` set and their alpha-memory is empty.
 When elements first arrive at such a `HashJoinNode` via `right-activate`, it demand-pulls matching facts from the parent `RootJoinNode` to generate tokens on-demand rather than having received them eagerly.
 This optimization is limited to the `RootJoinNode` → `HashJoinNode` boundary; `ExpressionJoinNode`, `NegationWithJoinFilterNode`, and `AccumulateWithJoinFilterNode` do not participate.
+
+**Phase 3.2 (done):** Full PHREAK delta propagation is implemented as an opt-in path.
+See <<implementation-status>> for details.
 
 === Key Interfaces
 
@@ -435,82 +438,66 @@ This ensures that queries against materialized memory always see a consistent st
 Between `fire-rules` calls, delta memory is converted to a persistent form (like `PersistentLocalMemory`).
 External `insert`/`retract` operations queue deltas into the persistent delta memory, which is converted to transient at the start of the next `fire-rules`.
 
-== Implementation Plan
+[[implementation-status]]
+== Implementation Status
 
-=== Current Status
+=== Phase 3.1 + 3.2 — Complete
 
 [cols="2,1,3"]
 |===
 |Component |Status |Notes
 
-|`RootJoinNode` deferral
+|`RootJoinNode` deferral (3.1)
 |**Done**
-|Defers token creation when children have `:left-parent-id` and empty alpha-memory (`engine.cljc` ~line 854)
+|Defers token creation when children have `:left-parent-id` and empty alpha-memory (`engine.cljc`)
 
-|`HashJoinNode` demand-pull
+|`HashJoinNode` demand-pull (3.1)
 |**Done**
-|`right-activate` fetches parent elements on first arrival when `left-parent-id` is set (`engine.cljc` ~line 950)
+|`right-activate` fetches parent elements on first arrival when `left-parent-id` is set
 
-|Compiler `:left-parent-id` assignment
+|Compiler `:left-parent-id` assignment (3.1)
 |**Done**
-|Emitted for direct single-parent children of `RootJoinNode` (`compiler.clj` ~line 1977)
+|Emitted for direct single-parent children of `RootJoinNode` (`compiler.clj`)
 
-|`ExpressionJoinNode` demand-pull
-|**Partial**
-|Field `:left-parent-id` present in record but demand-pull logic not wired into `right-activate`
+|`IDeltaMemory` + `TransientDeltaMemory` (3.2)
+|**Done**
+|`delta_memory.cljc` — ordered op lists per node; 3 volatiles (elem-ops, tok-ops, dirty)
 
-|`NegationWithJoinFilterNode` demand-pull
-|**Not started**
-|No `:left-parent-id` field
+|`DeltaTransport` (3.2)
+|**Done**
+|`engine.cljc` — queues insert/retract ops and marks nodes dirty instead of cascading
 
-|`AccumulateWithJoinFilterNode` demand-pull
-|**Not started**
-|No `:left-parent-id` field
+|`IDeltaEvaluate` + `evaluate-delta` per node (3.2)
+|**Done**
+|All node types in `engine.cljc`; `default-evaluate-delta` fallback for complex nodes
 
-|Delta protocols (`IDeltaReceive`, `IDeltaEvaluate`, `IDeltaTransport`)
-|**Not started**
-|Full PHREAK phase -- not yet designed or implemented
+|`compute-beta-topo-order` (3.2)
+|**Done**
+|DFS pre-order from beta roots; stored as `:beta-topo-order` in rulebase
 
-|Segment / dirty-flag infrastructure
-|**Not started**
-|No segment concept exists yet
+|`run-pull-phase!` + `fire-rules-phreak*` (3.2)
+|**Done**
+|Pull loop converges (re-runs until no dirty nodes); fire loop interleaves pull after each activation
 
-|`fire-rules*` pull phase
-|**Not started**
-|Loop is still pure eager/eager-flush
+|Test coverage (3.2)
+|**Done**
+|`opts-fixture` runs all 713 CLJ tests under PHREAK; 0 failures
 |===
 
-=== Phase A: Infrastructure (Proposed)
+=== Known Limitations / Future Work
 
-. Define `DeltaMemory` protocol and transient/persistent implementations
-. Define `IDeltaReceive` and `IDeltaEvaluate` protocols
-. Define `IDeltaTransport` protocol
-. Implement segment identification and dirty tracking
-. Add `delta-memory` field to `LocalSession`
+* `ExpressionJoinNode` demand-pull: field `:left-parent-id` present but demand-pull not wired
+* `NegationWithJoinFilterNode`, `AccumulateWithJoinFilterNode` demand-pull: not wired
+* `AccumulateWithJoinFilterNode.right-retract`: does not use `retract-fn` (TODO)
+* PHREAK path is opt-in (`:use-phreak true`); removing the feature flag and making it default is Phase D
+* Delta queue structures could be further optimized (ArrayList on CLJ, typed array on CLJS)
 
-=== Phase B: Node Migration (Proposed)
+=== Phase D: Cleanup & Optimization (Future)
 
-Migrate nodes one at a time, maintaining backward compatibility through the transition:
-
-. `ExpressionJoinNode` -- complete the demand-pull wiring already started (field present, logic missing)
-. `NegationNode` / `NegationWithJoinFilterNode` -- add `:left-parent-id` and match-count tracking
-. `AccumulateNode` / `AccumulateWithJoinFilterNode` -- incremental accumulation
-. `TestNode` -- stateless, straightforward
-. `ProductionNode` / `QueryNode` -- terminal nodes, pull roots
-
-=== Phase C: fire-rules Integration (Proposed)
-
-. Implement pull-phase traversal (evaluate dirty paths top-down)
-. Modify `fire-rules*` loop to interleave pull and fire phases
-. Migrate truth maintenance to delta-based retraction cascading
-. Remove eager `ITransport` usage, switch to `IDeltaTransport`
-
-=== Phase D: Cleanup & Optimization (Proposed)
-
-. Remove legacy eager code paths
-. Optimize delta queue data structures (ArrayList on CLJ, array on CLJS)
+. Remove `:use-phreak` feature flag, make PHREAK the default path
+. Optimize delta queue data structures (ArrayList on CLJ, typed array on CLJS)
+. Complete demand-pull wiring for `ExpressionJoinNode`, `NegationWithJoinFilterNode`, `AccumulateWithJoinFilterNode`
 . Tune pull ordering (evaluate highest-priority production paths first)
-. Benchmark and profile against Phase 2 baseline
 
 == Correctness Considerations
 

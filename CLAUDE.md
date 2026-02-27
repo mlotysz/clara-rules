@@ -98,3 +98,27 @@ The `defsession` macro in `.cljc` files evaluates rule/query vars on the Clojure
 - Schema validation via Prismatic Schema (`prismatic/schema`); tests use `schema.test/validate-schemas` fixture
 - Test options fixture: `clara.tools.testing-utils/opts-fixture` wraps tests to run with multiple engine configurations
 - Reflection warnings enabled in dev profile (`*warn-on-reflection* true`)
+
+## Development Workflow
+
+Before merging or considering any change complete, always run in this order:
+
+1. **Lint first**: `clojure -M:dev -m clj-kondo.main --lint src/main:src/test --fail-level error`
+2. **All tests**: run all three suites and confirm 0 failures in each:
+   ```bash
+   clojure -M:test             # standard (713 tests, 3 configs via opts-fixture)
+   clojure -M:test-generative  # property-based (4 tests, ~9k assertions)
+   clojure -M:test-performance # performance assertions (2 tests)
+   ```
+3. Only after all tests pass, proceed with benchmarking or committing.
+
+## Benchmarks
+
+Result files in `bench/` are numbered snapshots for historical comparison:
+- `01-oracle.txt` — oracle 0.24.0 baseline
+- `02-optimizations.txt` — fork after Phases 1–3.1
+- `03-phreak.txt` — fork after Phase 3.2 (PHREAK delta propagation)
+
+Run current fork: `clojure -M:bench`
+Save a new snapshot: `clojure -M:bench | tee bench/NN-description.txt`
+Fork vs oracle comparison: `bash bench/compare.sh`

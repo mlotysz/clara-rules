@@ -7,6 +7,7 @@
      (:require [clara.rules.update-cache.core :as uc]
                [clara.rules.update-cache.cancelling :as ca]
                [clara.rules.compiler :as com]
+               [clara.rules.engine :as eng]
                [clara.macros :as m]
                [clara.rules.dsl :as dsl]
                [clojure.test :refer [is]]))
@@ -78,12 +79,15 @@
 
 #?(:clj
    (defn opts-fixture
-     ;; For operations other than replace-facts uc/get-ordered-update-cache is currently
-     ;; always used.  This fixture ensures that CancellingUpdateCache is tested for a wide
-     ;; variety of different cases rather than a few cases cases specific to it.
+     ;; Runs each test under three engine configurations:
+     ;;   1. Default ordered update cache (baseline).
+     ;;   2. CancellingUpdateCache — tests the cancelling path.
+     ;;   3. PHREAK delta-queue + pull-phase path.
      [f]
      (f)
      (with-redefs [uc/get-ordered-update-cache ca/get-cancelling-update-cache]
+       (f))
+     (binding [eng/*additional-fire-rules-opts* {:use-phreak true}]
        (f))))
 
 (defn join-filter-equals
