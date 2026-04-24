@@ -21,3 +21,5 @@ figwheel_server.log
 .lsp
 node_modules/*
 /.claude
+.envrc
+.direnv/
